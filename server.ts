@@ -4,7 +4,7 @@ import path from "path";
 import fs from "fs";
 import cors from "cors";
 import { Telegraf, Markup, Context } from "telegraf";
-import Database from "better-sqlite3";
+import mongoose from "mongoose";
 import axios from "axios";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
@@ -14,8 +14,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // --- CONFIGURATION ---
-const PORT = process.env.PORT || 3000;
-const db = new Database("bot_database.db");
+const PORT = Number(process.env.PORT) || 3000;
+const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/telegram_bot";
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const ADMIN_ID = process.env.ADMIN_ID || "";
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY || "";
@@ -28,63 +28,91 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
-// --- DATABASE SETUP ---
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY,
-    telegram_id TEXT UNIQUE,
-    username TEXT,
-    first_name TEXT,
-    state TEXT DEFAULT 'START',
-    uid_1xbet TEXT,
-    screenshot_reg_url TEXT,
-    screenshot_dep_url TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    is_active INTEGER DEFAULT 0
-  );
+// --- MONGODB SETUP ---
+mongoose.connect(MONGODB_URI)
+  .then(() => console.log("✅ connected to MongoDB"))
+  .catch(err => console.error("❌ MongoDB connection error:", err));
 
-  CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT,
-    role TEXT,
-    content TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
+const UserSchema = new mongoose.Schema({
+  telegram_id: { type: String, unique: true, required: true },
+  username: String,
+  first_name: String,
+  state: { type: String, default: 'START' },
+  uid_1xbet: String,
+  screenshot_reg_url: String,
+  screenshot_dep_url: String,
+  created_at: { type: Date, default: Date.now },
+  is_active: { type: Boolean, default: false }
+});
 
-  CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
-  );
+const MessageSchema = new mongoose.Schema({
+  user_id: String,
+  role: String,
+  content: String,
+  timestamp: { type: Date, default: Date.now }
+});
 
-  CREATE TABLE IF NOT EXISTS bot_config (
-    step_id TEXT PRIMARY KEY,
-    message TEXT,
-    media_url TEXT,
-    delay_ms INTEGER,
-    btn_text TEXT,
-    btn_url TEXT,
-    is_enabled INTEGER DEFAULT 1
-  );
-`);
+const SettingSchema = new mongoose.Schema({
+  key: { type: String, unique: true },
+  value: String
+});
 
-// Migration for existing databases
-try {
-  db.prepare("ALTER TABLE bot_config ADD COLUMN is_enabled INTEGER DEFAULT 1").run();
-} catch (e) {
-  // Column already exists
-}
+const BotConfigSchema = new mongoose.Schema({
+  step_id: { type: String, unique: true },
+  message: String,
+  media_url: String,
+  delay_ms: Number,
+  btn_text: String,
+  btn_url: String,
+  is_enabled: { type: Boolean, default: true }
+});
+
+const User = mongoose.model('User', UserSchema);
+const Message = mongoose.model('Message', MessageSchema);
+const Setting = mongoose.model('Setting', SettingSchema);
+const BotConfig = mongoose.model('BotConfig', BotConfigSchema);
 
 // Initial system prompt
-const defaultPrompt = "Tu es Marc, un assistant expert en stratégies de jeux (notamment Apple of Fortune). Ton ton est amical, professionnel et encourageant. Tu parles comme un humain réel. Ton objectif est d'aider l'utilisateur à gagner en utilisant le bot VIP.";
-const existingPrompt = db.prepare("SELECT value FROM settings WHERE key = 'system_prompt'").get();
-if (!existingPrompt) {
-  db.prepare("INSERT INTO settings (key, value) VALUES (?, ?)").run("system_prompt", defaultPrompt);
+async function initDb() {
+  const defaultPrompt = "Tu es Marc, un assistant expert en stratégies de jeux (notamment Apple of Fortune). Ton ton est amical, professionnel et encourageant. Tu parles comme un humain réel. Ton objectif est d'aider l'utilisateur à gagner en utilisant le bot VIP.";
+  const existing = await Setting.findOne({ key: 'system_prompt' });
+  if (!existing) {
+    await Setting.create({ key: 'system_prompt', value: defaultPrompt });
+  }
+
+  const initialSteps = [
+    { id: 'welcome', msg: "Salut {name} ! 👋\n\nC'est super d'accueillir de nouveaux membres dans mon équipe ! Tu rejoins une communauté de personnes fortes et prometteuses 💪\nSi t'es prêt·e à utiliser mon hackbot et profiter des faille dit juste « je veux gagner » d'accord ? 🚀", delay: 0 },
+    { id: 'welcome_video', msg: "Regarde ça ! 🔥", media: "https://t.me/mm25video/2", delay: 3000, btn_text: "Rejoindre le canal 🔓", btn_url: "https://cut.solkah.org/vipdm" },
+    { id: 'ask_interest', msg: "T'es interesser par rebot apple of fortune ??", delay: 4000 },
+    { id: 'show_proofs', msg: "Super je te presente notre bot alors", delay: 0 },
+    { id: 'proof_1', msg: "🎥 Preuve 1", media: "https://t.me/mm25video/5", delay: 500 },
+    { id: 'proof_2', msg: "🎥 Preuve 2", media: "https://t.me/mm25video/4", delay: 500 },
+    { id: 'proof_3', msg: "🎥 Preuve 3", media: "https://t.me/mm25video/3", delay: 500 },
+    { id: 'ask_agreement', msg: "Comme vous voiyer dans les video le bot predit les position apple of fortune donc si t'es prete je t'envoie les etape a suivre pour que tu puiisse toi ausi gagner t'es d'accord ??", delay: 2000 },
+    { id: 'instructions', msg: "Voici les etape a suivre avant que je te donne le bot :\n\nCreer un nouveau compte 1xbet ou melbet avec le code promo FSRAFA c'est obligatoire pour que le bot puiise reconnaire ton compte", delay: 0 },
+    { id: 'reg_btn', msg: "Bref une fois que ton compte creer tu m'envoie la capture de ton id pour que je puisse ajouter dans le program j'ai mis en bas le bouton pour s'inscrire directement", delay: 2000, btn_text: "S'inscrire 🚀", btn_url: "https://cut.solkah.org/fsrafasub" }
+  ];
+
+  for (const s of initialSteps) {
+    const exists = await BotConfig.findOne({ step_id: s.id });
+    if (!exists) {
+      await BotConfig.create({
+        step_id: s.id,
+        message: s.msg,
+        media_url: s.media || null,
+        delay_ms: s.delay,
+        btn_text: s.btn_text || null,
+        btn_url: s.btn_url || null,
+        is_enabled: true
+      });
+    }
+  }
 }
+initDb();
 
 // --- BOT TELEGRAM ---
 const bot = new Telegraf(BOT_TOKEN);
 
-// Helper function to download and save photo
 async function savePhoto(ctx: Context, fileId: string): Promise<string> {
   const link = await ctx.telegram.getFileLink(fileId);
   const response = await axios({
@@ -99,11 +127,7 @@ async function savePhoto(ctx: Context, fileId: string): Promise<string> {
 }
 
 async function sendToAdmin(photoSource: string, caption: string, userId: string, step: 'REG' | 'DEP') {
-  if (!ADMIN_ID) {
-    console.warn("⚠️ [ADMIN] ADMIN_ID non configuré. Impossible d'envoyer la preuve.");
-    return;
-  }
-  
+  if (!ADMIN_ID) return;
   try {
     await bot.telegram.sendPhoto(ADMIN_ID, photoSource, {
       caption: `📸 Nouvelle preuve (${step})\nID User: ${userId}\n${caption}`,
@@ -114,448 +138,277 @@ async function sendToAdmin(photoSource: string, caption: string, userId: string,
         ]
       ])
     });
-    console.log(`[ADMIN] Preuve ${step} envoyée à l'admin ${ADMIN_ID} pour l'user ${userId}`);
   } catch (err: any) {
-    console.error(`[ADMIN] Erreur lors de l'envoi de la photo à l'admin:`, err.message);
-    // Fallback: envoyer au moins le texte si la photo échoue
-    try {
-      await bot.telegram.sendMessage(ADMIN_ID, `⚠️ Échec envoi photo pour l'user ${userId} (${step}).\n${caption}\n\nL'image a été sauvegardée localement.`);
-    } catch (e) {}
+    console.error(`[ADMIN] Send photo error:`, err.message);
+    try { await bot.telegram.sendMessage(ADMIN_ID, `⚠️ Échec envoi photo user ${userId} (${step}).\n${caption}`); } catch (e) {}
   }
 }
 
-// Initialization of dynamic steps
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function safeReplyWithVideo(ctx: Context, userId: string, mediaUrl: string, options: any) {
   if (!mediaUrl) return;
-
   try {
-    // Attempt to send as a video (works for file_ids and direct .mp4 links)
-    if (ctx) {
-      await ctx.replyWithVideo(mediaUrl, options);
-    } else {
-      await bot.telegram.sendVideo(userId, mediaUrl, options);
-    }
+    if (ctx) await ctx.replyWithVideo(mediaUrl, options);
+    else await bot.telegram.sendVideo(userId, mediaUrl, options);
   } catch (err: any) {
     console.error(`[Telegram] Video failure (${mediaUrl}):`, err.message);
-    
-    // Fallback if the URL is not a direct video (like a t.me link)
     const caption = options.caption || "";
-    const replyMarkup = options.reply_markup;
-    const isClean = !caption || caption.trim() === "";
-    
-    // If user wants it clean (no caption), we just send the info link or the button
-    const message = isClean 
-      ? `🎥 Regarder la vidéo : ${mediaUrl}` 
-      : `${caption}\n\n🎥 Regarder la vidéo : ${mediaUrl}`;
-    
-    if (ctx) {
-      await ctx.reply(message, { reply_markup: replyMarkup });
-    } else {
-      await bot.telegram.sendMessage(userId, message, { reply_markup: replyMarkup });
-    }
+    const msg = caption ? `${caption}\n\n🎥 Regarder la vidéo : ${mediaUrl}` : `🎥 Regarder la vidéo : ${mediaUrl}`;
+    if (ctx) await ctx.reply(msg, { reply_markup: options.reply_markup });
+    else await bot.telegram.sendMessage(userId, msg, { reply_markup: options.reply_markup });
   }
 }
 
-// --- LOG VIDEO FILE_ID FOR ADMIN ---
 bot.on("video", (ctx) => {
-  const userId = ctx.from.id.toString();
-  if (userId === ADMIN_ID) {
+  if (ctx.from.id.toString() === ADMIN_ID) {
     const fileId = ctx.message.video.file_id;
-    ctx.reply(`✅ Vidéo reçue !\n\nVoici le **file_id** à copier-coller dans votre dashboard (Média URL) pour qu'elle s'affiche directement :\n\n\`${fileId}\``);
-    console.log(`[ADMIN] New Video File ID: ${fileId}`);
+    ctx.reply(`✅ Vidéo reçue !\n\nFile ID:\n\n\`${fileId}\``);
   }
 });
 
-const initialSteps = [
-  { id: 'welcome', msg: "Salut {name} ! 👋\n\nC'est super d'accueillir de nouveaux membres dans mon équipe ! Tu rejoins une communauté de personnes fortes et prometteuses 💪\nSi t'es prêt·e à utiliser mon hackbot et profiter des faille dit juste « je veux gagner » d'accord ? 🚀", delay: 0 },
-  { id: 'welcome_video', msg: "Regarde ça ! 🔥", media: "https://t.me/mm25video/2", delay: 3000, btn_text: "Rejoindre le canal 🔓", btn_url: "https://cut.solkah.org/vipdm" },
-  { id: 'ask_interest', msg: "T'es interesser par rebot apple of fortune ??", delay: 4000 },
-  { id: 'show_proofs', msg: "Super je te presente notre bot alors", delay: 0 },
-  { id: 'proof_1', msg: "🎥 Preuve 1", media: "https://t.me/mm25video/5", delay: 500 },
-  { id: 'proof_2', msg: "🎥 Preuve 2", media: "https://t.me/mm25video/4", delay: 500 },
-  { id: 'proof_3', msg: "🎥 Preuve 3", media: "https://t.me/mm25video/3", delay: 500 },
-  { id: 'ask_agreement', msg: "Comme vous voiyer dans les video le bot predit les position apple of fortune donc si t'es prete je t'envoie les etape a suivre pour que tu puiisse toi ausi gagner t'es d'accord ??", delay: 2000 },
-  { id: 'instructions', msg: "Voici les etape a suivre avant que je te donne le bot :\n\nCreer un nouveau compte 1xbet ou melbet avec le code promo FSRAFA c'est obligatoire pour que le bot puiise reconnaire ton compte", delay: 0 },
-  { id: 'reg_btn', msg: "Bref une fois que ton compte creer tu m'envoie la capture de ton id pour que je puisse ajouter dans le program j'ai mis en bas le bouton pour s'inscrire directement", delay: 2000, btn_text: "S'inscrire 🚀", btn_url: "https://cut.solkah.org/fsrafasub" }
-];
-
-for (const s of initialSteps) {
-  db.prepare("INSERT OR IGNORE INTO bot_config (step_id, message, media_url, delay_ms, btn_text, btn_url, is_enabled) VALUES (?, ?, ?, ?, ?, ?, 1)").run(
-    s.id, s.msg, s.media || null, s.delay, s.btn_text || null, s.btn_url || null
-  );
-}
-
-// Helper to get step config
-function getStep(id: string): any {
-  return db.prepare("SELECT * FROM bot_config WHERE step_id = ?").get(id);
-}
-
-// Update startFunnel to use dynamic steps and target DM
 async function startFunnel(userId: string, user: any) {
-  const welcome = getStep('welcome');
-  const welcomeVideo = getStep('welcome_video');
-  const askInterest = getStep('ask_interest');
+  const welcome = await BotConfig.findOne({ step_id: 'welcome' });
+  const welcomeVideo = await BotConfig.findOne({ step_id: 'welcome_video' });
+  const askInterest = await BotConfig.findOne({ step_id: 'ask_interest' });
 
   if (welcome && welcome.is_enabled) {
-    const welcomeMsg = welcome.message.replace("{name}", user.first_name || "l'ami");
-    await bot.telegram.sendMessage(userId, welcomeMsg);
+    await bot.telegram.sendMessage(userId, welcome.message.replace("{name}", user.first_name || "l'ami"));
   }
-  
   if (welcomeVideo && welcomeVideo.is_enabled) {
     if (welcomeVideo.delay_ms) await delay(welcomeVideo.delay_ms);
-    await safeReplyWithVideo(null as any, userId, welcomeVideo.media_url, {
+    await safeReplyWithVideo(null as any, userId, welcomeVideo.media_url!, {
       caption: welcomeVideo.message,
-      reply_markup: Markup.inlineKeyboard([
-        [Markup.button.url(welcomeVideo.btn_text, welcomeVideo.btn_url)]
-      ]).reply_markup
+      reply_markup: Markup.inlineKeyboard([[Markup.button.url(welcomeVideo.btn_text!, welcomeVideo.btn_url!)]]).reply_markup
     });
   }
-
   if (askInterest && askInterest.is_enabled) {
     if (askInterest.delay_ms) await delay(askInterest.delay_ms);
-    await bot.telegram.sendMessage(userId, askInterest.message);
+    await bot.telegram.sendMessage(userId, askInterest.message!);
   }
-  db.prepare("UPDATE users SET state = 'WAITING_INTEREST' WHERE telegram_id = ?").run(user.telegram_id);
+  await User.updateOne({ telegram_id: userId }, { state: 'WAITING_INTEREST' });
 }
 
-// In bot.on("message") - Onboarding Funnel Logic
-
-// Detect Join Requests
+// Join Request
 bot.on("chat_join_request", async (ctx) => {
   const userId = ctx.chatJoinRequest.from.id.toString();
-  const firstName = ctx.chatJoinRequest.from.first_name || "Ami";
-  const username = ctx.chatJoinRequest.from.username || "";
-
-  console.log(`[Join Request] Nouvel utilisateur détecté: ${firstName} (${userId})`);
-
-  // Wait 10 seconds as requested
   await delay(10000);
-
-  let user = db.prepare("SELECT * FROM users WHERE telegram_id = ?").get(userId) as any;
+  let user = await User.findOne({ telegram_id: userId });
   if (!user) {
-    db.prepare("INSERT INTO users (telegram_id, first_name, username, state) VALUES (?, ?, ?, 'START')").run(userId, firstName, username);
-    user = db.prepare("SELECT * FROM users WHERE telegram_id = ?").get(userId);
+    user = await User.create({
+      telegram_id: userId,
+      first_name: ctx.chatJoinRequest.from.first_name,
+      username: ctx.chatJoinRequest.from.username,
+      state: 'START'
+    });
   }
-
-  try {
-    await startFunnel(userId, user);
-  } catch (err: any) {
-    console.error(`[Join Request] Erreur DM:`, err.message);
-  }
-});
-
-// Update /start command
-bot.command("start", async (ctx) => {
-  const userId = ctx.from.id.toString();
-  db.prepare("INSERT OR IGNORE INTO users (telegram_id, username, first_name, state) VALUES (?, ?, ?, ?)").run(
-    userId,
-    ctx.from.username || "",
-    ctx.from.first_name,
-    "START"
-  );
-  const user = db.prepare("SELECT * FROM users WHERE telegram_id = ?").get(userId);
   await startFunnel(userId, user);
 });
 
-// Helper for AI responses
-async function getAIResponse(user: any, userText: string) {
-  if (!OPENROUTER_API_KEY || OPENROUTER_API_KEY.trim() === "" || OPENROUTER_API_KEY === "YOUR_API_KEY") {
-    console.error("⚠️ [AI] OPENROUTER_API_KEY ou GEMINI_API_KEY est manquant.");
-    return "Désolé, l'IA n'est pas configurée (Clé API manquante dans l'environnement).";
+bot.command("start", async (ctx) => {
+  const userId = ctx.from.id.toString();
+  let user = await User.findOne({ telegram_id: userId });
+  if (!user) {
+    user = await User.create({
+      telegram_id: userId,
+      first_name: ctx.from.first_name,
+      username: ctx.from.username,
+      state: 'START'
+    });
   }
+  await startFunnel(userId, user);
+});
 
-  const historyEntries = db.prepare("SELECT role, content FROM messages WHERE user_id = ? ORDER BY timestamp DESC LIMIT 10").all(user.telegram_id).reverse() as { role: string; content: string }[];
-  const systemPromptQuery = db.prepare("SELECT value FROM settings WHERE key = 'system_prompt'").get() as { value: string };
-  const systemPrompt = systemPromptQuery.value;
+async function getAIResponse(user: any, userText: string) {
+  if (!OPENROUTER_API_KEY || OPENROUTER_API_KEY.includes("YOUR_")) return "IA non configurée.";
   
-  // Build a context string based on user state
+  const history = await Message.find({ user_id: user.telegram_id }).sort({ timestamp: -1 }).limit(10);
+  const historyEntries = history.reverse();
+  const sysSetting = await Setting.findOne({ key: 'system_prompt' });
+  const systemPrompt = sysSetting?.value || "";
+
   let context = `\n[ACTION REQUISE]: `;
-  if (user.state === "WAITING_INTEREST") context += "L'utilisateur doit dire 'je veux gagner' pour continuer. Ne donne aucune instruction avant cela.";
-  if (user.state === "WAITING_STEPS_AGREEMENT") context += "L'utilisateur doit accepter de suivre les étapes (inscription + dépôt). Ne passe pas à la suite avant son accord.";
-  if (user.state === "REG_SCREENSHOT_PENDING" || user.state === "REG_WAITING_ADMIN") context += "L'utilisateur doit envoyer sa capture d'inscription code FSRAFA. Aide-le UNIQUEMENT sur l'inscription.";
-  if (user.state === "DEP_SCREENSHOT_PENDING" || user.state === "DEP_WAITING_ADMIN") context += "L'utilisateur doit faire son dépôt (3000f min) et envoyer la capture. Aide-le UNIQUEMENT sur le dépôt.";
-  if (user.is_active) context = "\n[ACCÈS VIP]: L'utilisateur est membre. Tu peux parler de stratégies de jeu.";
-
-  const systemInstruction = `${systemPrompt}
-${context}
-
-CONSIGNES STRICTES:
-1. RÉPONSE TRÈS COURTE: Maximum 20-30 mots (1 à 2 phrases courtes).
-2. RESTE DANS LE CONTEXTE: Si l'utilisateur pose une question hors sujet ou sur une étape future, ramène-le gentiment à l'action requise ci-dessus.
-3. TON: Direct, motivant, comme un pote expert. Pas de blabla inutile.`;
+  if (user.state === "WAITING_INTEREST") context += "Doit dire 'je veux gagner'.";
+  else if (user.state === "WAITING_STEPS_AGREEMENT") context += "Doit accepter les étapes.";
+  else if (user.state.includes("REG")) context += "Doit envoyer capture inscription FSRAFA.";
+  else if (user.state.includes("DEP")) context += "Doit envoyer capture depot.";
+  else if (user.is_active) context = "\n[ACCÈS VIP].";
 
   try {
-    const response = await axios.post("https://openrouter.ai/api/v1/chat/completions", {
-      model: "google/gemma-4-31b-it",
+    const res = await axios.post("https://openrouter.ai/api/v1/chat/completions", {
+      model: "google/gemma-2-9b-it",
       messages: [
-        { role: "system", content: systemInstruction },
-        ...historyEntries.map(m => ({
-          role: m.role,
-          content: m.content
-        })),
+        { role: "system", content: `${systemPrompt}${context}\n\nCOURT (20 mots max). Direct.` },
+        ...historyEntries.map(m => ({ role: m.role, content: m.content })),
         { role: "user", content: userText }
       ]
-    }, {
-      headers: { 
-        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-        "HTTP-Referer": process.env.APP_URL || "https://google.com",
-        "X-Title": "Telegram Bot Marc"
-      }
-    });
-
-    return response.data.choices[0].message.content || "Je n'ai pas pu générer de réponse.";
-  } catch (err: any) {
-    console.error("AI Error:", err.message);
-    if (err.response?.data) console.error("Details:", JSON.stringify(err.response.data));
-    return "Je rencontre un petit souci technique passager. Repose ta question dans un instant !";
-  }
+    }, { headers: { "Authorization": `Bearer ${OPENROUTER_API_KEY}` } });
+    return res.data.choices[0].message.content;
+  } catch { return "Service indisponible."; }
 }
 
 bot.on("message", async (ctx) => {
   if (ctx.chat.type !== 'private') return;
-  let user = db.prepare("SELECT * FROM users WHERE telegram_id = ?").get(ctx.from.id.toString()) as any;
-  
-  if (!user) {
-    db.prepare("INSERT OR IGNORE INTO users (telegram_id, username, first_name) VALUES (?, ?, ?)").run(
-      ctx.from.id.toString(),
-      ctx.from.username || "",
-      ctx.from.first_name
-    );
-    user = db.prepare("SELECT * FROM users WHERE telegram_id = ?").get(ctx.from.id.toString());
-  }
+  const userId = ctx.from.id.toString();
+  let user = await User.findOne({ telegram_id: userId });
+  if (!user) user = await User.create({ telegram_id: userId, first_name: ctx.from.first_name, username: ctx.from.username });
 
   const text = (ctx.message as any).text;
-  const lowText = text?.toLowerCase();
   const isPhoto = !!(ctx.message as any).photo;
 
-  if (text) {
-    db.prepare("INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)").run(user.telegram_id, 'user', text);
-  }
+  if (text) await Message.create({ user_id: userId, role: 'user', content: text });
 
-  // Keywords for progression
-  const positiveKws = ["oui", "ok", "d'accord", "je veux gagner", "interesser", "intéressé", "c'est bon", "go", "pret", "prêt"];
-  const isPositive = lowText && positiveKws.some(kw => lowText.includes(kw));
+  const lowText = text?.toLowerCase() || "";
+  const positiveKws = ["oui", "ok", "d'accord", "je veux gagner", "interesser", "go", "pret"];
+  const isPositive = positiveKws.some(kw => lowText.includes(kw));
 
-  // --- AUTOMATED FLOW LOGIC (Priority to keywords) ---
-
-  // Step 1: Interest -> Show Proofs
   if (user.state === 'WAITING_INTEREST' && isPositive) {
-    const stepShow = getStep('show_proofs');
-    const p1 = getStep('proof_1');
-    const p2 = getStep('proof_2');
-    const p3 = getStep('proof_3');
-    const askAgree = getStep('ask_agreement');
-
-    if (stepShow && stepShow.is_enabled) await ctx.reply(stepShow.message);
+    const steps = await BotConfig.find({ step_id: { $in: ['show_proofs', 'proof_1', 'proof_2', 'proof_3', 'ask_agreement'] } });
+    const getS = (id: string) => steps.find(s => s.step_id === id);
     
-    if (p1 && p1.is_enabled && p1.media_url) await safeReplyWithVideo(ctx, user.telegram_id, p1.media_url, { caption: p1.message });
-    if (p2 && p2.is_enabled && p2.media_url) await safeReplyWithVideo(ctx, user.telegram_id, p2.media_url, { caption: p2.message });
-    if (p3 && p3.is_enabled && p3.media_url) await safeReplyWithVideo(ctx, user.telegram_id, p3.media_url, { caption: p3.message });
+    const show = getS('show_proofs');
+    if (show?.is_enabled) await ctx.reply(show.message!);
     
-    if (askAgree && askAgree.is_enabled) {
-      if (askAgree.delay_ms) await delay(askAgree.delay_ms);
-      await ctx.reply(askAgree.message);
+    for (const pId of ['proof_1', 'proof_2', 'proof_3']) {
+      const p = getS(pId);
+      if (p?.is_enabled && p.media_url) await safeReplyWithVideo(ctx, userId, p.media_url, { caption: p.message });
     }
-    db.prepare("UPDATE users SET state = 'WAITING_STEPS_AGREEMENT' WHERE telegram_id = ?").run(user.telegram_id);
+    const agree = getS('ask_agreement');
+    if (agree?.is_enabled) {
+      if (agree.delay_ms) await delay(agree.delay_ms);
+      await ctx.reply(agree.message!);
+    }
+    await User.updateOne({ telegram_id: userId }, { state: 'WAITING_STEPS_AGREEMENT' });
     return;
   }
 
-  // Step 2: Agreement -> Instructions
   if (user.state === 'WAITING_STEPS_AGREEMENT' && isPositive) {
-    const inst = getStep('instructions');
-    const rBtn = getStep('reg_btn');
-    
-    if (inst && inst.is_enabled) await ctx.reply(inst.message);
-    
-    if (rBtn && rBtn.is_enabled) {
+    const inst = await BotConfig.findOne({ step_id: 'instructions' });
+    const rBtn = await BotConfig.findOne({ step_id: 'reg_btn' });
+    if (inst?.is_enabled) await ctx.reply(inst.message!);
+    if (rBtn?.is_enabled) {
       if (rBtn.delay_ms) await delay(rBtn.delay_ms);
-      const msg = await ctx.reply(rBtn.message, Markup.inlineKeyboard([[Markup.button.url(rBtn.btn_text, rBtn.btn_url)]]));
+      const msg = await ctx.reply(rBtn.message!, Markup.inlineKeyboard([[Markup.button.url(rBtn.btn_text!, rBtn.btn_url!)]]));
       try { await ctx.telegram.pinChatMessage(ctx.chat.id, msg.message_id); } catch(e) {}
     }
-    
-    db.prepare("UPDATE users SET state = 'REG_SCREENSHOT_PENDING' WHERE telegram_id = ?").run(user.telegram_id);
+    await User.updateOne({ telegram_id: userId }, { state: 'REG_SCREENSHOT_PENDING' });
     return;
   }
 
-  // Handle Photos (Screenshot uploads)
   if (isPhoto) {
-    if (user.state === 'REG_SCREENSHOT_PENDING' || user.state === 'REG_WAITING_ADMIN') {
-      const photoArr = (ctx.message as any).photo;
-      const fileId = photoArr[photoArr.length - 1].file_id;
-      const localUrl = await savePhoto(ctx, fileId);
-      db.prepare("UPDATE users SET screenshot_reg_url = ?, state = 'REG_WAITING_ADMIN' WHERE telegram_id = ?").run(localUrl, user.telegram_id);
-      await ctx.reply("Merci, je vérifie ton inscription et je reviens vers toi très vite ! ⏳");
-      await sendToAdmin(fileId, `Vérification ID`, user.telegram_id, 'REG');
-      return;
+    const photoArr = (ctx.message as any).photo;
+    const fileId = photoArr[photoArr.length - 1].file_id;
+    const localUrl = await savePhoto(ctx, fileId);
+    if (user.state.includes('REG')) {
+      await User.updateOne({ telegram_id: userId }, { screenshot_reg_url: localUrl, state: 'REG_WAITING_ADMIN' });
+      await ctx.reply("Vérification en cours... ⏳");
+      await sendToAdmin(fileId, `Vérification ID`, userId, 'REG');
+    } else if (user.state.includes('DEP')) {
+      await User.updateOne({ telegram_id: userId }, { screenshot_dep_url: localUrl, state: 'DEP_WAITING_ADMIN' });
+      await ctx.reply("Validation dépôt en cours... ⏳");
+      await sendToAdmin(fileId, `Vérification Dépôt`, userId, 'DEP');
     }
-    if (user.state === 'DEP_SCREENSHOT_PENDING' || user.state === 'DEP_WAITING_ADMIN') {
-      const photoArr = (ctx.message as any).photo;
-      const fileId = photoArr[photoArr.length - 1].file_id;
-      const localUrl = await savePhoto(ctx, fileId);
-      db.prepare("UPDATE users SET screenshot_dep_url = ?, state = 'DEP_WAITING_ADMIN' WHERE telegram_id = ?").run(localUrl, user.telegram_id);
-      await ctx.reply("Merci, un administrateur valide ton dépôt... ⏳");
-      await sendToAdmin(fileId, `Vérification Dépôt`, user.telegram_id, 'DEP');
-      return;
-    }
+    return;
   }
 
-  // --- AI FALLBACK (Contextual questions) ---
   if (text) {
     const aiText = await getAIResponse(user, text);
     await ctx.reply(aiText);
-    db.prepare("INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)").run(user.telegram_id, 'assistant', aiText);
+    await Message.create({ user_id: userId, role: 'assistant', content: aiText });
   }
 });
-
 
 bot.action(/^accept_(REG|DEP)_(.+)$/, async (ctx) => {
   const [, type, userId] = ctx.match;
   if (type === 'REG') {
-    db.prepare("UPDATE users SET state = 'DEP_SCREENSHOT_PENDING' WHERE telegram_id = ?").run(userId);
-    await bot.telegram.sendMessage(userId, "c'est bon maintenant fait ton premiere depot pour activer ton compte mais minimum 3000f ou 5$ et envoie la capture");
+    await User.updateOne({ telegram_id: userId }, { state: 'DEP_SCREENSHOT_PENDING' });
+    await bot.telegram.sendMessage(userId, "c'est bon maintenant fait ton premiere depot (min 3000f) et envoie la capture");
   } else {
-    db.prepare("UPDATE users SET state = 'ACTIVE', is_active = 1 WHERE telegram_id = ?").run(userId);
+    await User.updateOne({ telegram_id: userId }, { state: 'ACTIVE', is_active: true });
     await bot.telegram.sendMessage(userId, "bro tout est ok voici le lien du bot m.solkah.org");
   }
-  await ctx.editMessageCaption(`✅ Validé par admin\nID: ${userId}`);
-  await ctx.answerCbQuery("Action validée");
+  await ctx.editMessageCaption(`✅ Validé\nID: ${userId}`);
+  await ctx.answerCbQuery("Validé");
 });
 
 bot.action(/^reject_(REG|DEP)_(.+)$/, async (ctx) => {
   const [, type, userId] = ctx.match;
-  
-  // Réinitialiser l'état pour permettre de renvoyer une photo
   const newState = type === 'REG' ? 'REG_SCREENSHOT_PENDING' : 'DEP_SCREENSHOT_PENDING';
-  db.prepare("UPDATE users SET state = ? WHERE telegram_id = ?").run(newState, userId);
-
-  await bot.telegram.sendMessage(userId, "❌ La vérification a échoué. Assure-toi d'avoir utilisé le code promo FSRAFA et que la capture est bien lisible. Tu peux renvoyer la capture dès maintenant.");
-  await ctx.editMessageCaption(`❌ Rejeté par admin\nID: ${userId}`);
-  await ctx.answerCbQuery("Action rejetée");
+  await User.updateOne({ telegram_id: userId }, { state: newState });
+  await bot.telegram.sendMessage(userId, "❌ Rejeté. Utilise le code promo FSRAFA et renvoie une capture lisible.");
+  await ctx.editMessageCaption(`❌ Rejeté\nID: ${userId}`);
+  await ctx.answerCbQuery("Rejeté");
 });
 
-// Global Bot Error Handler
-bot.catch((err: any, ctx) => {
-  console.error(`[Telegram Error] Update ${ctx.update.update_id} caused error:`, err);
-});
+bot.catch(err => console.error("[Bot Error]", err));
 
 // --- EXPRESS SERVER ---
 const app = express();
 app.use(express.json());
 app.use(cors());
-
-// Serve uploads statically
 app.use("/uploads", express.static(UPLOADS_DIR));
 
-// Admin authentication
 app.post("/api/admin/login", (req, res) => {
-  const { password } = req.body;
-  if (bcrypt.compareSync(password, ADMIN_PASSWORD_HASH)) {
-    const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '1d' });
-    res.json({ token });
-  } else {
-    res.status(401).json({ error: "Mot de passe erroné" });
-  }
+  if (bcrypt.compareSync(req.body.password, ADMIN_PASSWORD_HASH)) {
+    res.json({ token: jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '1d' }) });
+  } else res.status(401).json({ error: "Erreur" });
 });
 
 const authMiddleware = (req: any, res: any, next: any) => {
-  const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(403).json({ error: "No token" });
   try {
-    jwt.verify(token, JWT_SECRET);
+    jwt.verify(req.headers.authorization?.split(" ")[1] || "", JWT_SECRET);
     next();
-  } catch {
-    res.status(403).json({ error: "Invalid token" });
-  }
+  } catch { res.status(403).json({ error: "Invalid" }); }
 };
 
-app.get("/api/admin/stats", authMiddleware, (req, res) => {
-  const stats = {
-    total: db.prepare("SELECT count(*) as count FROM users").get() as any,
-    active: db.prepare("SELECT count(*) as count FROM users WHERE is_active = 1").get() as any,
-    pending: db.prepare("SELECT count(*) as count FROM users WHERE state LIKE '%WAITING%'").get() as any
-  };
-  res.json({
-    total: stats.total.count,
-    active: stats.active.count,
-    pending: stats.pending.count
-  });
+app.get("/api/admin/stats", authMiddleware, async (req, res) => {
+  const total = await User.countDocuments();
+  const active = await User.countDocuments({ is_active: true });
+  const pending = await User.countDocuments({ state: /WAITING/ });
+  res.json({ total, active, pending });
 });
 
-app.get("/api/admin/users", authMiddleware, (req, res) => {
-  const users = db.prepare("SELECT * FROM users ORDER BY created_at DESC").all();
-  res.json(users);
+app.get("/api/admin/users", authMiddleware, async (req, res) => {
+  res.json(await User.find().sort({ created_at: -1 }));
 });
 
-app.post("/api/admin/settings", authMiddleware, (req, res) => {
-  const { prompt } = req.body;
-  db.prepare("UPDATE settings SET value = ? WHERE key = 'system_prompt'").run(prompt);
+app.post("/api/admin/settings", authMiddleware, async (req, res) => {
+  await Setting.updateOne({ key: 'system_prompt' }, { value: req.body.prompt }, { upsert: true });
   res.json({ success: true });
 });
 
-app.get("/api/admin/settings", authMiddleware, (req, res) => {
-  const prompt = db.prepare("SELECT value FROM settings WHERE key = 'system_prompt'").get();
-  res.json(prompt);
+app.get("/api/admin/settings", authMiddleware, async (req, res) => {
+  res.json(await Setting.findOne({ key: 'system_prompt' }));
 });
 
-app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", bot_token: !!BOT_TOKEN, admin_id: !!ADMIN_ID });
-});
-
-app.delete("/api/admin/users/:id", authMiddleware, (req, res) => {
-  const { id } = req.params;
-  db.prepare("DELETE FROM users WHERE telegram_id = ?").run(id);
+app.delete("/api/admin/users/:id", authMiddleware, async (req, res) => {
+  await User.deleteOne({ telegram_id: req.params.id });
   res.json({ success: true });
 });
 
-app.get("/api/admin/bot-config", authMiddleware, (req, res) => {
-  const configs = db.prepare("SELECT * FROM bot_config").all();
-  res.json(configs);
+app.get("/api/admin/bot-config", authMiddleware, async (req, res) => {
+  res.json(await BotConfig.find());
 });
 
-app.post("/api/admin/bot-config", authMiddleware, (req, res) => {
-  const { step_id, message, media_url, delay_ms, btn_text, btn_url, is_enabled } = req.body;
-  db.prepare(`
-    UPDATE bot_config 
-    SET message = ?, media_url = ?, delay_ms = ?, btn_text = ?, btn_url = ?, is_enabled = ?
-    WHERE step_id = ?
-  `).run(message, media_url, delay_ms, btn_text, btn_url, is_enabled, step_id);
+app.post("/api/admin/bot-config", authMiddleware, async (req, res) => {
+  const { step_id, ...updates } = req.body;
+  await BotConfig.updateOne({ step_id }, { $set: updates }, { upsert: true });
   res.json({ success: true });
 });
 
-// Start bot
-if (BOT_TOKEN) {
-  bot.launch()
-    .then(() => console.log("Bot running"))
-    .catch(err => {
-      console.error("Bot launch failed:", err);
-      if (err.message.includes('401')) {
-        console.error("Invalid Telegram Bot Token. Please check your credentials.");
-      }
-    });
-} else {
-  console.warn("TELEGRAM_BOT_TOKEN is not set. Bot functionalitty is disabled.");
-}
+app.get("/api/health", (req, res) => res.json({ status: "ok", bot: !!BOT_TOKEN }));
+
+if (BOT_TOKEN) bot.launch().then(() => console.log("Bot running")).catch(e => console.error("Bot fail", e));
 
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    const dist = path.join(process.cwd(), "dist");
+    app.use(express.static(dist));
+    app.get("*", (req, res) => res.sendFile(path.join(dist, "index.html")));
   }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Admin Panel running on port ${PORT}`);
-  });
+  app.listen(PORT, "0.0.0.0", () => console.log(`Server port ${PORT}`));
 }
-
 startServer();
