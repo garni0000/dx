@@ -396,6 +396,44 @@ app.post("/api/admin/bot-config", authMiddleware, async (req, res) => {
   res.json({ success: true });
 });
 
+app.get("/keep-alive", (req, res) => res.status(200).send("I'm alive! 🚀"));
+
+app.post("/api/admin/broadcast", authMiddleware, async (req, res) => {
+  const { type, content, media_url, btn_text, btn_url } = req.body;
+  const users = await User.find({}, 'telegram_id');
+  
+  if (!users.length) return res.status(400).json({ error: "Aucun utilisateur trouvé" });
+
+  let successCount = 0;
+  let failCount = 0;
+
+  const extra = btn_text && btn_url 
+    ? Markup.inlineKeyboard([[Markup.button.url(btn_text, btn_url)]])
+    : undefined;
+
+  for (const user of users) {
+    try {
+      if (type === 'text') {
+        await bot.telegram.sendMessage(user.telegram_id, content || "", extra);
+      } else if (type === 'photo') {
+        await bot.telegram.sendPhoto(user.telegram_id, media_url, { caption: content, ...extra });
+      } else if (type === 'video') {
+        await bot.telegram.sendVideo(user.telegram_id, media_url, { caption: content, ...extra });
+      } else if (type === 'audio') {
+        await bot.telegram.sendVoice(user.telegram_id, media_url, { caption: content, ...extra });
+      }
+      successCount++;
+    } catch (err) {
+      console.error(`[Broadcast] Error for user ${user.telegram_id}:`, err);
+      failCount++;
+    }
+    // Small delay to avoid rate limits
+    await new Promise(r => setTimeout(r, 50));
+  }
+
+  res.json({ success: true, successCount, failCount });
+});
+
 app.get("/api/health", (req, res) => res.json({ status: "ok", bot: !!BOT_TOKEN }));
 
 if (BOT_TOKEN) bot.launch().then(() => console.log("Bot running")).catch(e => console.error("Bot fail", e));

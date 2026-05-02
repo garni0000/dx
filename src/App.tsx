@@ -17,13 +17,17 @@ import {
   Save,
   Clock,
   Video,
-  Trash2
+  Trash2,
+  Megaphone,
+  Image,
+  Mic,
+  Type
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 // --- TYPES ---
 interface User {
-  id: number;
+  _id?: string;
   telegram_id: string;
   username: string;
   first_name: string;
@@ -32,7 +36,7 @@ interface User {
   screenshot_reg_url: string;
   screenshot_dep_url: string;
   created_at: string;
-  is_active: number;
+  is_active: boolean;
 }
 
 interface Stats {
@@ -84,13 +88,20 @@ export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [password, setPassword] = useState('');
   const [token, setToken] = useState(localStorage.getItem('admin_token') || '');
-  const [activeTab, setActiveTab] = useState('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'users' | 'broadcast' | 'bot-logic' | 'settings'>('dashboard');
   const [users, setUsers] = useState<User[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [botConfigs, setBotConfigs] = useState<BotStep[]>([]);
   const [serverStatus, setServerStatus] = useState<{ ok: boolean; bot: boolean; admin: boolean }>({ ok: false, bot: false, admin: false });
   const [prompt, setPrompt] = useState('');
-  const [broadcastMessage, setBroadcastMessage] = useState('');
+  const [broadcastData, setBroadcastData] = useState({
+    type: 'text' as 'text' | 'photo' | 'video' | 'audio',
+    content: '',
+    media_url: '',
+    btn_text: '',
+    btn_url: ''
+  });
+  const [isBroadcasting, setIsBroadcasting] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -191,6 +202,29 @@ export default function App() {
     }
   };
 
+  const handleBroadcast = async () => {
+    if (!broadcastData.content && broadcastData.type === 'text') return alert("Le message est vide");
+    if (!window.confirm("Voulez-vous lancer la diffusion à tous les utilisateurs ?")) return;
+
+    setIsBroadcasting(true);
+    try {
+      const res = await fetch('/api/admin/broadcast', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(broadcastData)
+      });
+      const data = await res.json();
+      alert(`Diffusion terminée !\n✅ Succès: ${data.successCount}\n❌ Échecs: ${data.failCount}`);
+    } catch (err) {
+      alert("Erreur lors de la diffusion");
+    } finally {
+      setIsBroadcasting(false);
+    }
+  };
+
   const handleLogout = () => {
     localStorage.removeItem('admin_token');
     setIsLoggedIn(false);
@@ -213,23 +247,6 @@ export default function App() {
     }
   };
 
-  const sendBroadcast = async () => {
-    if (!broadcastMessage) return;
-    try {
-      await fetch('/api/admin/broadcast', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ message: broadcastMessage })
-      });
-      alert("Message envoyé !");
-      setBroadcastMessage('');
-    } catch (err) {
-      alert("Erreur d'envoi");
-    }
-  };
 
   if (!isLoggedIn) {
     return (
@@ -304,8 +321,8 @@ export default function App() {
             onClick={() => setActiveTab('users')} 
           />
           <SidebarItem 
-            icon={MessageSquare} 
-            label="Broadcast" 
+            icon={Megaphone} 
+            label="Diffusion" 
             active={activeTab === 'broadcast'} 
             onClick={() => setActiveTab('broadcast')} 
           />
@@ -381,7 +398,7 @@ export default function App() {
                       </thead>
                       <tbody className="divide-y divide-gray-800">
                         {users.slice(0, 5).map(user => (
-                          <tr key={user.id} className="hover:bg-white/5 transition-colors">
+                          <tr key={user.telegram_id} className="hover:bg-white/5 transition-colors">
                             <td className="px-6 py-4">
                               <div className="flex flex-col">
                                 <span className="font-medium text-white">{user.first_name}</span>
@@ -440,7 +457,7 @@ export default function App() {
                     </thead>
                     <tbody className="divide-y divide-gray-800">
                       {users.map(user => (
-                        <tr key={user.id} className="hover:bg-white/5 transition-colors">
+                        <tr key={user.telegram_id} className="hover:bg-white/5 transition-colors">
                           <td className="px-6 py-4 text-sm font-mono text-gray-400">{user.telegram_id}</td>
                           <td className="px-6 py-4">@{user.username}</td>
                           <td className="px-6 py-4 text-emerald-400 font-bold">{user.uid_1xbet || '-'}</td>
@@ -603,7 +620,150 @@ export default function App() {
               </motion.div>
             )}
 
-            {activeTab === 'settings' && (
+            {activeTab === 'broadcast' && (
+            <div className="space-y-6">
+              <div className="bg-[#0f1115] border border-gray-800/50 rounded-2xl p-6 md:p-8">
+                <div className="flex items-center gap-3 mb-8">
+                  <div className="p-3 bg-blue-500/10 rounded-xl">
+                    <Megaphone className="text-blue-500" size={24} />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold text-white">Nouvelle Diffusion</h2>
+                    <p className="text-sm text-gray-500">Envoyez un message à tous vos membres Telegram</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                  <div className="space-y-6">
+                    {/* Message Type */}
+                    <div className="space-y-3">
+                      <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-1">Type de Message</label>
+                      <div className="grid grid-cols-4 gap-2">
+                        {[
+                          { id: 'text', icon: <Type size={16} />, label: 'Texte' },
+                          { id: 'photo', icon: <Image size={16} />, label: 'Photo' },
+                          { id: 'video', icon: <Video size={16} />, label: 'Vidéo' },
+                          { id: 'audio', icon: <Mic size={16} />, label: 'Voc/Aud' }
+                        ].map((t) => (
+                          <button
+                            key={t.id}
+                            onClick={() => setBroadcastData(prev => ({ ...prev, type: t.id as any }))}
+                            className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${
+                              broadcastData.type === t.id 
+                                ? 'bg-blue-500/10 border-blue-500 text-blue-500' 
+                                : 'bg-black/20 border-gray-800/50 text-gray-500 hover:border-gray-700'
+                            }`}
+                          >
+                            {t.icon}
+                            <span className="text-[10px] font-medium">{t.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Media URL */}
+                    {broadcastData.type !== 'text' && (
+                      <div className="space-y-3">
+                        <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-1">URL du Média / File ID</label>
+                        <input
+                          type="text"
+                          value={broadcastData.media_url}
+                          onChange={(e) => setBroadcastData(prev => ({ ...prev, media_url: e.target.value }))}
+                          className="w-full bg-black/40 border border-gray-800 text-white px-4 py-3 rounded-xl outline-none focus:border-blue-500/50 transition-colors"
+                          placeholder="Collez le lien ou le file_id..."
+                        />
+                      </div>
+                    )}
+
+                    {/* Content */}
+                    <div className="space-y-3">
+                      <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-1">Message (Légende)</label>
+                      <textarea
+                        value={broadcastData.content}
+                        onChange={(e) => setBroadcastData(prev => ({ ...prev, content: e.target.value }))}
+                        className="w-full bg-black/40 border border-gray-800 text-white px-4 py-3 rounded-xl outline-none h-40 resize-none focus:border-blue-500/50 transition-colors"
+                        placeholder="Écrivez votre message ici..."
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-6">
+                    {/* Action Button */}
+                    <div className="bg-blue-500/5 border border-blue-500/10 p-6 rounded-2xl space-y-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Plus size={14} className="text-blue-400" />
+                        <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Bouton d'Action (Optionnel)</span>
+                      </div>
+                      <div className="space-y-3">
+                        <div className="relative">
+                          <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[10px] font-bold text-gray-600">TITRE</span>
+                          <input
+                            type="text"
+                            value={broadcastData.btn_text}
+                            onChange={(e) => setBroadcastData(prev => ({ ...prev, btn_text: e.target.value }))}
+                            className="w-full bg-black/40 border border-gray-800 text-sm text-white pl-16 pr-4 py-3 rounded-xl outline-none"
+                            placeholder="ex: Rejoindre le VIP"
+                          />
+                        </div>
+                        <div className="relative">
+                          <span className="absolute left-4 top-1/2 -translate-y-1/2 text-[10px] font-bold text-gray-600">LIEN</span>
+                          <input
+                            type="text"
+                            value={broadcastData.btn_url}
+                            onChange={(e) => setBroadcastData(prev => ({ ...prev, btn_url: e.target.value }))}
+                            className="w-full bg-black/40 border border-gray-800 text-sm text-white pl-16 pr-4 py-3 rounded-xl outline-none"
+                            placeholder="https://..."
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Preview (Simple) */}
+                    <div className="border border-gray-800/50 rounded-2xl p-6 bg-black/20">
+                      <span className="text-[10px] font-bold text-gray-600 uppercase tracking-widest mb-4 block">Aperçu rapide</span>
+                      <div className="bg-[#1c1f26] rounded-2xl p-4 max-w-[280px]">
+                        {broadcastData.type !== 'text' && broadcastData.media_url && (
+                          <div className="aspect-video bg-black/40 rounded-lg mb-3 flex items-center justify-center text-gray-600 border border-gray-800/50">
+                            {broadcastData.type === 'photo' && <Image size={24} />}
+                            {broadcastData.type === 'video' && <Play size={24} />}
+                            {broadcastData.type === 'audio' && <Mic size={24} />}
+                          </div>
+                        )}
+                        <p className="text-sm text-white whitespace-pre-wrap leading-relaxed">
+                          {broadcastData.content || <span className="text-gray-700 italic">Pas de message...</span>}
+                        </p>
+                        {broadcastData.btn_text && (
+                          <div className="mt-4 py-2 bg-blue-600 text-white text-xs font-bold rounded-lg text-center shadow-lg shadow-blue-900/20">
+                            {broadcastData.btn_text}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={handleBroadcast}
+                      disabled={isBroadcasting}
+                      className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 disabled:text-gray-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-blue-900/20 transition-all flex items-center justify-center gap-3 active:scale-[0.98]"
+                    >
+                      {isBroadcasting ? (
+                        <>
+                          <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          Diffusion en cours...
+                        </>
+                      ) : (
+                        <>
+                          <Send size={18} />
+                          Diffuser à tous les membres
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'settings' && (
               <motion.div
                 key="settings"
                 initial={{ opacity: 0, scale: 0.95 }}
@@ -632,35 +792,6 @@ export default function App() {
               </motion.div>
             )}
 
-            {activeTab === 'broadcast' && (
-              <motion.div
-                key="broadcast"
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="max-w-2xl bg-gray-900 border border-gray-800 p-8 rounded-3xl space-y-6"
-              >
-                <div className="flex items-center gap-3 text-emerald-400 font-bold">
-                  <Send size={24} />
-                  <span>Envoi Groupé (Broadcast)</span>
-                </div>
-                <p className="text-gray-400 text-sm">
-                  Ce message sera envoyé à TOUS les utilisateurs inscrits dans la base de données. Attention à ne pas spammer.
-                </p>
-                <textarea
-                  value={broadcastMessage}
-                  onChange={(e) => setBroadcastMessage(e.target.value)}
-                  className="w-full h-32 bg-black border border-gray-800 text-white p-4 rounded-xl focus:ring-2 focus:ring-emerald-500 transition-all outline-none"
-                  placeholder="Tapez votre message ici..."
-                />
-                <button
-                  onClick={sendBroadcast}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-6 py-3 rounded-xl transition-all shadow-lg shadow-emerald-500/20 active:scale-95 flex items-center gap-2"
-                >
-                  <XCircle size={20} className="rotate-45" />
-                  Diffuser le message
-                </button>
-              </motion.div>
-            )}
           </AnimatePresence>
         </main>
       </div>
