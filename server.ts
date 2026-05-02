@@ -62,9 +62,17 @@ db.exec(`
     media_url TEXT,
     delay_ms INTEGER,
     btn_text TEXT,
-    btn_url TEXT
+    btn_url TEXT,
+    is_enabled INTEGER DEFAULT 1
   );
 `);
+
+// Migration for existing databases
+try {
+  db.prepare("ALTER TABLE bot_config ADD COLUMN is_enabled INTEGER DEFAULT 1").run();
+} catch (e) {
+  // Column already exists
+}
 
 // Initial system prompt
 const defaultPrompt = "Tu es Marc, un assistant expert en stratégies de jeux (notamment Apple of Fortune). Ton ton est amical, professionnel et encourageant. Tu parles comme un humain réel. Ton objectif est d'aider l'utilisateur à gagner en utilisant le bot VIP.";
@@ -119,24 +127,46 @@ async function sendToAdmin(photoSource: string, caption: string, userId: string,
 // Initialization of dynamic steps
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function safeReplyWithVideo(ctx: Context, mediaUrl: string, options: any) {
+async function safeReplyWithVideo(ctx: Context, userId: string, mediaUrl: string, options: any) {
+  if (!mediaUrl) return;
+
   try {
-    await ctx.replyWithVideo(mediaUrl, options);
-  } catch (err: any) {
-    console.error(`[Telegram] Failed to send video (${mediaUrl}):`, err.message);
-    if (err.description?.includes('wrong type') || err.message?.includes('web page content')) {
-      const caption = options.caption ? options.caption : options.message || '';
-      await ctx.reply(`${caption ? caption + '\n\n' : ''}🎥 Vidéo: ${mediaUrl}`, {
-        reply_markup: options.reply_markup
-      });
+    // Attempt to send as a video (works for file_ids and direct .mp4 links)
+    if (ctx) {
+      await ctx.replyWithVideo(mediaUrl, options);
     } else {
-      // If it's a different error, just send as text anyway to be safe
-      await ctx.reply(`🎥 Vidéo (Problème d'affichage direct): ${mediaUrl}\n\n${options.caption || ''}`, {
-        reply_markup: options.reply_markup
-      });
+      await bot.telegram.sendVideo(userId, mediaUrl, options);
+    }
+  } catch (err: any) {
+    console.error(`[Telegram] Video failure (${mediaUrl}):`, err.message);
+    
+    // Fallback if the URL is not a direct video (like a t.me link)
+    const caption = options.caption || "";
+    const replyMarkup = options.reply_markup;
+    const isClean = !caption || caption.trim() === "";
+    
+    // If user wants it clean (no caption), we just send the info link or the button
+    const message = isClean 
+      ? `🎥 Regarder la vidéo : ${mediaUrl}` 
+      : `${caption}\n\n🎥 Regarder la vidéo : ${mediaUrl}`;
+    
+    if (ctx) {
+      await ctx.reply(message, { reply_markup: replyMarkup });
+    } else {
+      await bot.telegram.sendMessage(userId, message, { reply_markup: replyMarkup });
     }
   }
 }
+
+// --- LOG VIDEO FILE_ID FOR ADMIN ---
+bot.on("video", (ctx) => {
+  const userId = ctx.from.id.toString();
+  if (userId === ADMIN_ID) {
+    const fileId = ctx.message.video.file_id;
+    ctx.reply(`✅ Vidéo reçue !\n\nVoici le **file_id** à copier-coller dans votre dashboard (Média URL) pour qu'elle s'affiche directement :\n\n\`${fileId}\``);
+    console.log(`[ADMIN] New Video File ID: ${fileId}`);
+  }
+});
 
 const initialSteps = [
   { id: 'welcome', msg: "Salut {name} ! 👋\n\nC'est super d'accueillir de nouveaux membres dans mon équipe ! Tu rejoins une communauté de personnes fortes et prometteuses 💪\nSi t'es prêt·e à utiliser mon hackbot et profiter des faille dit juste « je veux gagner » d'accord ? 🚀", delay: 0 },
@@ -152,7 +182,7 @@ const initialSteps = [
 ];
 
 for (const s of initialSteps) {
-  db.prepare("INSERT OR IGNORE INTO bot_config (step_id, message, media_url, delay_ms, btn_text, btn_url) VALUES (?, ?, ?, ?, ?, ?)").run(
+  db.prepare("INSERT OR IGNORE INTO bot_config (step_id, message, media_url, delay_ms, btn_text, btn_url, is_enabled) VALUES (?, ?, ?, ?, ?, ?, 1)").run(
     s.id, s.msg, s.media || null, s.delay, s.btn_text || null, s.btn_url || null
   );
 }
@@ -168,29 +198,25 @@ async function startFunnel(userId: string, user: any) {
   const welcomeVideo = getStep('welcome_video');
   const askInterest = getStep('ask_interest');
 
-  const welcomeMsg = welcome.message.replace("{name}", user.first_name || "l'ami");
-  await bot.telegram.sendMessage(userId, welcomeMsg);
+  if (welcome && welcome.is_enabled) {
+    const welcomeMsg = welcome.message.replace("{name}", user.first_name || "l'ami");
+    await bot.telegram.sendMessage(userId, welcomeMsg);
+  }
   
-  if (welcomeVideo.delay_ms) await delay(welcomeVideo.delay_ms);
-  
-  try {
-    await bot.telegram.sendVideo(userId, welcomeVideo.media_url, {
+  if (welcomeVideo && welcomeVideo.is_enabled) {
+    if (welcomeVideo.delay_ms) await delay(welcomeVideo.delay_ms);
+    await safeReplyWithVideo(null as any, userId, welcomeVideo.media_url, {
       caption: welcomeVideo.message,
-      ...Markup.inlineKeyboard([
+      reply_markup: Markup.inlineKeyboard([
         [Markup.button.url(welcomeVideo.btn_text, welcomeVideo.btn_url)]
-      ])
-    });
-  } catch (err: any) {
-    console.error(`[Telegram] DM Video failed`, err.message);
-    await bot.telegram.sendMessage(userId, `${welcomeVideo.message}\n\n🎥 Vidéo: ${welcomeVideo.media_url}`, {
-      ...Markup.inlineKeyboard([
-        [Markup.button.url(welcomeVideo.btn_text, welcomeVideo.btn_url)]
-      ])
+      ]).reply_markup
     });
   }
 
-  if (askInterest.delay_ms) await delay(askInterest.delay_ms);
-  await bot.telegram.sendMessage(userId, askInterest.message);
+  if (askInterest && askInterest.is_enabled) {
+    if (askInterest.delay_ms) await delay(askInterest.delay_ms);
+    await bot.telegram.sendMessage(userId, askInterest.message);
+  }
   db.prepare("UPDATE users SET state = 'WAITING_INTEREST' WHERE telegram_id = ?").run(user.telegram_id);
 }
 
@@ -322,13 +348,16 @@ bot.on("message", async (ctx) => {
     const p3 = getStep('proof_3');
     const askAgree = getStep('ask_agreement');
 
-    await ctx.reply(stepShow.message);
-    if (p1.media_url) await safeReplyWithVideo(ctx, p1.media_url, { caption: p1.message });
-    if (p2.media_url) await safeReplyWithVideo(ctx, p2.media_url, { caption: p2.message });
-    if (p3.media_url) await safeReplyWithVideo(ctx, p3.media_url, { caption: p3.message });
+    if (stepShow && stepShow.is_enabled) await ctx.reply(stepShow.message);
     
-    if (askAgree.delay_ms) await delay(askAgree.delay_ms);
-    await ctx.reply(askAgree.message);
+    if (p1 && p1.is_enabled && p1.media_url) await safeReplyWithVideo(ctx, user.telegram_id, p1.media_url, { caption: p1.message });
+    if (p2 && p2.is_enabled && p2.media_url) await safeReplyWithVideo(ctx, user.telegram_id, p2.media_url, { caption: p2.message });
+    if (p3 && p3.is_enabled && p3.media_url) await safeReplyWithVideo(ctx, user.telegram_id, p3.media_url, { caption: p3.message });
+    
+    if (askAgree && askAgree.is_enabled) {
+      if (askAgree.delay_ms) await delay(askAgree.delay_ms);
+      await ctx.reply(askAgree.message);
+    }
     db.prepare("UPDATE users SET state = 'WAITING_STEPS_AGREEMENT' WHERE telegram_id = ?").run(user.telegram_id);
     return;
   }
@@ -337,12 +366,16 @@ bot.on("message", async (ctx) => {
   if (user.state === 'WAITING_STEPS_AGREEMENT' && isPositive) {
     const inst = getStep('instructions');
     const rBtn = getStep('reg_btn');
-    await ctx.reply(inst.message);
-    if (rBtn.delay_ms) await delay(rBtn.delay_ms);
-    const msg = await ctx.reply(rBtn.message, Markup.inlineKeyboard([[Markup.button.url(rBtn.btn_text, rBtn.btn_url)]]));
+    
+    if (inst && inst.is_enabled) await ctx.reply(inst.message);
+    
+    if (rBtn && rBtn.is_enabled) {
+      if (rBtn.delay_ms) await delay(rBtn.delay_ms);
+      const msg = await ctx.reply(rBtn.message, Markup.inlineKeyboard([[Markup.button.url(rBtn.btn_text, rBtn.btn_url)]]));
+      try { await ctx.telegram.pinChatMessage(ctx.chat.id, msg.message_id); } catch(e) {}
+    }
+    
     db.prepare("UPDATE users SET state = 'REG_SCREENSHOT_PENDING' WHERE telegram_id = ?").run(user.telegram_id);
-    await delay(3000);
-    try { await ctx.telegram.pinChatMessage(ctx.chat.id, msg.message_id); } catch(e) {}
     return;
   }
 
@@ -470,18 +503,24 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", bot_token: !!BOT_TOKEN, admin_id: !!ADMIN_ID });
 });
 
+app.delete("/api/admin/users/:id", authMiddleware, (req, res) => {
+  const { id } = req.params;
+  db.prepare("DELETE FROM users WHERE telegram_id = ?").run(id);
+  res.json({ success: true });
+});
+
 app.get("/api/admin/bot-config", authMiddleware, (req, res) => {
   const configs = db.prepare("SELECT * FROM bot_config").all();
   res.json(configs);
 });
 
 app.post("/api/admin/bot-config", authMiddleware, (req, res) => {
-  const { step_id, message, media_url, delay_ms, btn_text, btn_url } = req.body;
+  const { step_id, message, media_url, delay_ms, btn_text, btn_url, is_enabled } = req.body;
   db.prepare(`
     UPDATE bot_config 
-    SET message = ?, media_url = ?, delay_ms = ?, btn_text = ?, btn_url = ?
+    SET message = ?, media_url = ?, delay_ms = ?, btn_text = ?, btn_url = ?, is_enabled = ?
     WHERE step_id = ?
-  `).run(message, media_url, delay_ms, btn_text, btn_url, step_id);
+  `).run(message, media_url, delay_ms, btn_text, btn_url, is_enabled, step_id);
   res.json({ success: true });
 });
 

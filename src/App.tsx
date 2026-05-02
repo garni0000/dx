@@ -16,7 +16,8 @@ import {
   Play,
   Save,
   Clock,
-  Video
+  Video,
+  Trash2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -47,6 +48,7 @@ interface BotStep {
   delay_ms: number;
   btn_text?: string;
   btn_url?: string;
+  is_enabled: number;
 }
 
 // --- COMPONENTS ---
@@ -171,6 +173,21 @@ export default function App() {
       setError("Erreur de connexion");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const deleteUser = async (telegramId: string) => {
+    if (!window.confirm("Êtes-vous sûr de vouloir supprimer cet utilisateur ? Cette action est irréversible.")) return;
+
+    try {
+      await fetch(`/api/admin/users/${telegramId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      setUsers(prev => prev.filter(u => u.telegram_id !== telegramId));
+    } catch (err) {
+      alert("Erreur lors de la suppression");
+      console.error(err);
     }
   };
 
@@ -381,9 +398,16 @@ export default function App() {
                             <td className="px-6 py-4 text-xs text-gray-500">
                               {new Date(user.created_at).toLocaleDateString()}
                             </td>
-                            <td className="px-6 py-4">
-                              <button className="text-white hover:text-blue-400">
+                            <td className="px-6 py-4 flex items-center gap-3">
+                              <button className="text-white hover:text-blue-400" title="Envoyer message">
                                 <Send size={16} />
+                              </button>
+                              <button 
+                                onClick={() => deleteUser(user.telegram_id)}
+                                className="text-gray-500 hover:text-red-500 transition-colors"
+                                title="Supprimer l'utilisateur"
+                              >
+                                <Trash2 size={16} />
                               </button>
                             </td>
                           </tr>
@@ -411,6 +435,7 @@ export default function App() {
                         <th className="px-6 py-4">UID 1xBet</th>
                         <th className="px-6 py-4">Étape</th>
                         <th className="px-6 py-4">Preuves</th>
+                        <th className="px-6 py-4 text-right">Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-800">
@@ -436,6 +461,15 @@ export default function App() {
                                </a>
                              )}
                           </td>
+                          <td className="px-6 py-4 text-right">
+                            <button 
+                              onClick={() => deleteUser(user.telegram_id)}
+                              className="p-2 text-gray-500 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-all"
+                              title="Supprimer l'utilisateur"
+                            >
+                              <Trash2 size={18} />
+                            </button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -449,79 +483,118 @@ export default function App() {
                 key="bot-logic"
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
-                className="grid grid-cols-1 xl:grid-cols-2 gap-6"
+                className="grid grid-cols-1 md:grid-cols-2 gap-6"
               >
                 {botConfigs.map((step, idx) => (
-                  <div key={step.step_id} className="bg-gray-900 border border-gray-800 rounded-2xl p-6 space-y-4 hover:border-blue-500/50 transition-all">
+                  <div 
+                    key={step.step_id} 
+                    className={`bg-gray-900 border ${step.is_enabled ? 'border-gray-800' : 'border-red-900/30 opacity-75'} rounded-2xl p-6 space-y-4 hover:border-blue-500/50 transition-all relative overflow-hidden`}
+                  >
+                    {!step.is_enabled && (
+                      <div className="absolute top-0 right-0 bg-red-600 text-white text-[10px] font-bold px-3 py-1 rounded-bl-lg uppercase tracking-tighter">
+                        Désactivé
+                      </div>
+                    )}
+                    
                     <div className="flex justify-between items-center bg-black/30 p-3 rounded-xl">
                       <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-blue-600/20 text-blue-400 flex items-center justify-center font-bold text-sm">
+                        <div className={`w-8 h-8 rounded-full ${step.is_enabled ? 'bg-blue-600/20 text-blue-400' : 'bg-gray-800 text-gray-500'} flex items-center justify-center font-bold text-sm`}>
                           {idx + 1}
                         </div>
-                        <h4 className="font-bold text-gray-200 uppercase tracking-tight">{step.step_id}</h4>
+                        <div>
+                          <h4 className="font-bold text-gray-200 uppercase tracking-tight text-xs">{step.step_id}</h4>
+                          <p className="text-[10px] text-gray-500 font-medium">Configuration de l'étape</p>
+                        </div>
                       </div>
-                      <button 
-                        onClick={() => saveStep(step)}
-                        className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg flex items-center gap-2 transition-all shadow-lg shadow-blue-500/10"
-                      >
-                        <Save size={14} /> Enregistrer
-                      </button>
+                      
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => handleStepChange(step.step_id, 'is_enabled', step.is_enabled ? 0 : 1)}
+                          className={`p-1.5 rounded-lg transition-all ${step.is_enabled ? 'bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20' : 'bg-red-500/10 text-red-500 hover:bg-red-500/20'}`}
+                          title={step.is_enabled ? "Désactiver cette partie" : "Activer cette partie"}
+                        >
+                          {step.is_enabled ? <CheckCircle size={18} /> : <XCircle size={18} />}
+                        </button>
+                        <button 
+                          onClick={() => saveStep(step)}
+                          className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold px-4 py-2 rounded-lg flex items-center gap-2 transition-all shadow-lg shadow-blue-500/10 active:scale-95"
+                        >
+                          <Save size={14} /> Enregistrer
+                        </button>
+                      </div>
                     </div>
 
-                    <div className="space-y-3">
-                      <div>
-                        <label className="text-xs font-medium text-gray-500 mb-1 block">Message Telegram</label>
+                    <div className="space-y-4">
+                      <div className="bg-black/40 p-4 rounded-xl border border-gray-800/50 shadow-inner group">
+                        <label className="text-[10px] font-bold text-blue-500 uppercase tracking-widest mb-3 flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <MessageSquare size={12} /> Message 
+                          </div>
+                          <span className="text-gray-600 font-normal group-hover:text-gray-400 transition-colors">Texte envoyé par le bot</span>
+                        </label>
                         <textarea
                           value={step.message}
                           onChange={(e) => handleStepChange(step.step_id, 'message', e.target.value)}
-                          className="w-full bg-black border border-gray-800 text-sm text-white p-3 rounded-xl focus:ring-1 focus:ring-blue-500 outline-none h-24"
+                          className="w-full bg-transparent text-sm text-white placeholder:text-gray-700 outline-none h-28 resize-none leading-relaxed"
+                          placeholder="Écrivez le message ici... (Utilisez {name} pour le nom)"
                         />
                       </div>
 
                       <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <label className="text-xs font-medium text-gray-500 mb-1 block flex items-center gap-1">
-                            <Clock size={12} /> Délai (ms)
+                        <div className="bg-black/30 p-3 rounded-xl border border-gray-800/40">
+                          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2 flex items-center gap-1.5 px-1">
+                            <Clock size={12} className="text-amber-500/50" /> Attente (ms)
                           </label>
                           <input
                             type="number"
                             value={step.delay_ms}
                             onChange={(e) => handleStepChange(step.step_id, 'delay_ms', parseInt(e.target.value))}
-                            className="w-full bg-black border border-gray-800 text-sm text-white px-3 py-2 rounded-lg outline-none"
+                            className="w-full bg-black/50 border border-gray-800/50 text-sm text-white px-3 py-2 rounded-lg outline-none font-mono focus:border-amber-500/30 transition-colors"
                           />
                         </div>
-                        <div>
-                          <label className="text-xs font-medium text-gray-500 mb-1 block flex items-center gap-1">
-                            <Video size={12} /> Media URL (opt)
+                        <div className="bg-black/30 p-3 rounded-xl border border-gray-800/40">
+                          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2 flex items-center gap-1.5 px-1">
+                            <Video size={12} className="text-purple-500/50" /> Média (ID/URL)
                           </label>
                           <input
                             type="text"
                             value={step.media_url || ''}
                             onChange={(e) => handleStepChange(step.step_id, 'media_url', e.target.value)}
-                            className="w-full bg-black border border-gray-800 text-sm text-white px-3 py-2 rounded-lg outline-none"
-                            placeholder="t.me/video/..."
+                            className="w-full bg-black/50 border border-gray-800/50 text-sm text-white px-3 py-2 rounded-lg outline-none truncate focus:border-purple-500/30 transition-colors"
+                            placeholder="file_id ou URL"
                           />
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-4 border-t border-gray-800 pt-4">
-                        <div>
-                          <label className="text-xs font-medium text-gray-500 mb-1 block">Texte Bouton</label>
-                          <input
-                            type="text"
-                            value={step.btn_text || ''}
-                            onChange={(e) => handleStepChange(step.step_id, 'btn_text', e.target.value)}
-                            className="w-full bg-black border border-gray-800 text-sm text-white px-3 py-2 rounded-lg outline-none"
-                          />
+                      <div className="bg-blue-600/5 border border-blue-500/10 p-5 rounded-2xl relative group">
+                        <div className="flex items-center gap-2 mb-4">
+                          <div className="p-1 bg-blue-500/10 rounded-md">
+                            <Plus size={12} className="text-blue-400" />
+                          </div>
+                          <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Bouton d'Action</span>
                         </div>
-                        <div>
-                          <label className="text-xs font-medium text-gray-500 mb-1 block">URL Bouton</label>
-                          <input
-                            type="text"
-                            value={step.btn_url || ''}
-                            onChange={(e) => handleStepChange(step.step_id, 'btn_url', e.target.value)}
-                            className="w-full bg-black border border-gray-800 text-sm text-white px-3 py-2 rounded-lg outline-none"
-                          />
+                        
+                        <div className="grid grid-cols-1 gap-3">
+                          <div className="relative">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-gray-600 uppercase">TITRE</span>
+                            <input
+                              type="text"
+                              value={step.btn_text || ''}
+                              onChange={(e) => handleStepChange(step.step_id, 'btn_text', e.target.value)}
+                              className="w-full bg-black/40 border border-gray-800 text-xs text-white pl-12 pr-3 py-2.5 rounded-xl outline-none placeholder:text-gray-700 focus:border-blue-500/20"
+                              placeholder="ex: S'inscrire maintenant"
+                            />
+                          </div>
+                          <div className="relative">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-gray-600 uppercase">LIEN</span>
+                            <input
+                              type="text"
+                              value={step.btn_url || ''}
+                              onChange={(e) => handleStepChange(step.step_id, 'btn_url', e.target.value)}
+                              className="w-full bg-black/40 border border-gray-800 text-xs text-white pl-12 pr-3 py-2.5 rounded-xl outline-none placeholder:text-gray-700 focus:border-blue-500/20"
+                              placeholder="https://..."
+                            />
+                          </div>
                         </div>
                       </div>
                     </div>
