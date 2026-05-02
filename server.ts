@@ -14,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // --- CONFIGURATION ---
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 const db = new Database("bot_database.db");
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const ADMIN_ID = process.env.ADMIN_ID || "";
