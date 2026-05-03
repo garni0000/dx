@@ -84,6 +84,15 @@ const TemplateSchema = new mongoose.Schema({
 
 const Template = mongoose.model('Template', TemplateSchema);
 
+const AdminSessionSchema = new mongoose.Schema({
+  admin_id: { type: String, unique: true },
+  action: String, // 'CREATE_TEMPLATE' or 'BROADCAST'
+  step: String,
+  data: { type: mongoose.Schema.Types.Mixed, default: {} }
+});
+
+const AdminSession = mongoose.model('AdminSession', AdminSessionSchema);
+
 // Initial system prompt
 async function initDb() {
   const defaultPrompt = "Tu es Marc, un assistant expert en stratégies de jeux (notamment Apple of Fortune). Ton ton est amical, professionnel et encourageant. Tu parles comme un humain réel. Ton objectif est d'aider l'utilisateur à gagner en utilisant le bot VIP.";
@@ -259,6 +268,284 @@ async function getAIResponse(user: any, userText: string) {
   } catch { return "Service indisponible."; }
 }
 
+async function launchBroadcast(ctx: Context, data: any) {
+  const { type, content, media_url, btn_text, btn_url } = data;
+  await ctx.reply("📢 Diffusion en cours... Patientez.");
+  
+  const users = await User.find({ telegram_id: { $exists: true, $ne: "" } });
+  let success = 0;
+  let fail = 0;
+
+  const reply_markup = (btn_text && btn_url) 
+    ? { inline_keyboard: [[{ text: btn_text, url: btn_url }]] }
+    : undefined;
+
+  for (const u of users) {
+    try {
+      if (type === 'text') {
+        await bot.telegram.sendMessage(u.telegram_id, content || "", { reply_markup });
+      } else if (type === 'photo') {
+        await bot.telegram.sendPhoto(u.telegram_id, media_url, { caption: content, reply_markup });
+      } else if (type === 'video') {
+        await bot.telegram.sendVideo(u.telegram_id, media_url, { caption: content, reply_markup });
+      } else if (type === 'audio') {
+        try {
+          await bot.telegram.sendVoice(u.telegram_id, media_url, { caption: content, reply_markup });
+        } catch {
+          await bot.telegram.sendAudio(u.telegram_id, media_url, { caption: content, reply_markup });
+        }
+      }
+      success++;
+    } catch (e) { fail++; }
+    await new Promise(r => setTimeout(r, 60));
+  }
+
+  await ctx.reply(`✅ Diffusion terminée !\n\n🎉 Succès: ${success}\n❌ Échecs: ${fail}`);
+}
+
+bot.action(/^tpl_type:(.+)$/, async (ctx) => {
+  if (ctx.from?.id.toString() !== ADMIN_ID) return;
+  const type = ctx.match[1];
+  await AdminSession.updateOne({ admin_id: ADMIN_ID }, { 
+    step: 'TPL_CONTENT', 
+    'data.type': type 
+  });
+  
+  const msgs: any = {
+    text: "✍️ Envoyez maintenant le TEXTE du template :",
+    photo: "📸 Envoyez la PHOTO avec sa légende (optionnelle) :",
+    video: "🎬 Envoyez la VIDÉO avec sa légende (optionnelle) :",
+    audio: "🎵 Envoyez le fichier AUDIO ou VOCAL :"
+  };
+  
+  await ctx.reply(msgs[type]);
+  await ctx.answerCbQuery();
+});
+
+bot.action(/^tpl_btn:(.+)$/, async (ctx) => {
+  if (ctx.from?.id.toString() !== ADMIN_ID) return;
+  const choice = ctx.match[1];
+  const session = await AdminSession.findOne({ admin_id: ADMIN_ID }) as any;
+  if (!session) return ctx.answerCbQuery();
+
+  if (choice === 'yes') {
+    await AdminSession.updateOne({ admin_id: ADMIN_ID }, { step: 'TPL_BTN_TEXT' });
+    await ctx.reply("Entrez le TEXTE du bouton (ex: S'inscrire maintenant) :");
+  } else {
+    const tpl = new Template(session.data);
+    await tpl.save();
+    await AdminSession.deleteOne({ admin_id: ADMIN_ID });
+    await ctx.reply(`✅ Template "${session.data.name}" enregistré sans bouton.`);
+  }
+  await ctx.answerCbQuery();
+});
+
+bot.action(/^bc_btn:(.+)$/, async (ctx) => {
+  if (ctx.from?.id.toString() !== ADMIN_ID) return;
+  const choice = ctx.match[1];
+  const session = await AdminSession.findOne({ admin_id: ADMIN_ID }) as any;
+  if (!session) return ctx.answerCbQuery();
+
+  if (choice === 'yes') {
+    await AdminSession.updateOne({ admin_id: ADMIN_ID }, { step: 'BC_BTN_TEXT' });
+    await ctx.reply("Entrez le TEXTE du bouton :");
+  } else {
+    await AdminSession.deleteOne({ admin_id: ADMIN_ID });
+    await launchBroadcast(ctx, session.data);
+  }
+  await ctx.answerCbQuery();
+});
+
+bot.command("admin", async (ctx) => {
+  const userId = ctx.from.id.toString();
+  if (userId !== ADMIN_ID) return;
+
+  const stats = {
+    total: await User.countDocuments(),
+    active: await User.countDocuments({ is_active: true }),
+    withId: await User.countDocuments({ telegram_id: { $exists: true, $ne: "" } })
+  };
+
+  await ctx.reply(
+    `🛠 *Panel Admin Bot*\n\n` +
+    `👥 Total: ${stats.total}\n` +
+    `✅ Actifs: ${stats.active}\n` +
+    `🆔 IDs Valides: ${stats.withId}\n\n` +
+    `Que souhaitez-vous faire ?`,
+    {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("📜 Mes Templates", "admin_templates_list"), Markup.button.callback("➕ Créer Template", "admin_create_tpl")],
+        [Markup.button.callback("🖼 Photo", "admin_bc_photo"), Markup.button.callback("🎬 Vidéo", "admin_bc_video"), Markup.button.callback("🎵 Audio", "admin_bc_audio")],
+        [Markup.button.callback("📝 Texte Rapide", "admin_broadcast_text")],
+        [Markup.button.callback("📊 Statistiques", "admin_stats")]
+      ])
+    }
+  );
+});
+
+bot.action("admin_create_tpl", async (ctx) => {
+  if (ctx.from?.id.toString() !== ADMIN_ID) return;
+  await AdminSession.updateOne(
+    { admin_id: ADMIN_ID },
+    { action: 'CREATE_TEMPLATE', step: 'TPL_NAME', data: {} },
+    { upsert: true }
+  );
+  await ctx.reply("🏷 *Nouveau Template : Étape 1*\n\nEntrez le NOM de votre template (ex: Cadeau de Bienvenue) :");
+  await ctx.answerCbQuery();
+});
+
+bot.action("admin_bc_photo", async (ctx) => {
+  if (ctx.from?.id.toString() !== ADMIN_ID) return;
+  await AdminSession.updateOne(
+    { admin_id: ADMIN_ID },
+    { action: 'BROADCAST', step: 'BC_MEDIA', data: { type: 'photo' } },
+    { upsert: true }
+  );
+  await ctx.reply("📸 *Diffusion Photo*\n\nEnvoyez la PHOTO maintenant :");
+  await ctx.answerCbQuery();
+});
+
+bot.action("admin_bc_video", async (ctx) => {
+  if (ctx.from?.id.toString() !== ADMIN_ID) return;
+  await AdminSession.updateOne(
+    { admin_id: ADMIN_ID },
+    { action: 'BROADCAST', step: 'BC_MEDIA', data: { type: 'video' } },
+    { upsert: true }
+  );
+  await ctx.reply("🎬 *Diffusion Vidéo*\n\nEnvoyez la VIDÉO maintenant :");
+  await ctx.answerCbQuery();
+});
+
+bot.action("admin_bc_audio", async (ctx) => {
+  if (ctx.from?.id.toString() !== ADMIN_ID) return;
+  await AdminSession.updateOne(
+    { admin_id: ADMIN_ID },
+    { action: 'BROADCAST', step: 'BC_MEDIA', data: { type: 'audio' } },
+    { upsert: true }
+  );
+  await ctx.reply("🎵 *Diffusion Audio / Vocal*\n\nEnvoyez le FICHIER maintenant :");
+  await ctx.answerCbQuery();
+});
+
+bot.action("admin_templates_list", async (ctx) => {
+  if (ctx.from?.id.toString() !== ADMIN_ID) return;
+  const templates = await Template.find().sort({ created_at: -1 }).limit(10);
+  
+  if (templates.length === 0) {
+    await ctx.reply("❌ Aucun template trouvé. Créez-en un sur le dashboard web.");
+    return ctx.answerCbQuery();
+  }
+
+  const buttons = templates.map(t => [Markup.button.callback(`📄 ${t.name} (${t.type})`, `admin_tpl_view:${t._id}`)]);
+  
+  await ctx.reply("📂 *Vos Templates saved*\nChoisissez un template pour voir l'aperçu avant de diffuser :", {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard(buttons)
+  });
+  await ctx.answerCbQuery();
+});
+
+bot.action(/^admin_tpl_view:(.+)$/, async (ctx) => {
+  if (ctx.from?.id.toString() !== ADMIN_ID) return;
+  const tplId = ctx.match[1];
+  const tpl = await Template.findById(tplId);
+  if (!tpl) return ctx.answerCbQuery("Template introuvable");
+
+  const reply_markup = (tpl.btn_text && tpl.btn_url) 
+    ? { inline_keyboard: [[{ text: tpl.btn_text, url: tpl.btn_url }]] }
+    : undefined;
+
+  await ctx.reply(`Aperçu du template : *${tpl.name}*`, { parse_mode: 'Markdown' });
+
+  if (tpl.type === 'text') {
+    await ctx.reply(tpl.content || "Vide", { reply_markup });
+  } else if (tpl.type === 'photo' && tpl.media_url) {
+    await ctx.replyWithPhoto(tpl.media_url, { caption: tpl.content, reply_markup });
+  } else if (tpl.type === 'video' && tpl.media_url) {
+    await ctx.replyWithVideo(tpl.media_url, { caption: tpl.content, reply_markup });
+  } else if (tpl.type === 'audio' && tpl.media_url) {
+    await ctx.replyWithAudio(tpl.media_url, { caption: tpl.content, reply_markup });
+  }
+
+  await ctx.reply("🚀 Diffuser ce template à TOUS les utilisateurs ?", Markup.inlineKeyboard([
+    [Markup.button.callback("✅ OUI, LANCER LA DIFFUSION", `admin_tpl_send:${tplId}`)],
+    [Markup.button.callback("❌ Annuler", "admin_stats")]
+  ]));
+  await ctx.answerCbQuery();
+});
+
+bot.action(/^admin_tpl_send:(.+)$/, async (ctx) => {
+  if (ctx.from?.id.toString() !== ADMIN_ID) return;
+  const tplId = ctx.match[1];
+  const tpl = await Template.findById(tplId);
+  if (!tpl) return ctx.answerCbQuery("Template introuvable");
+
+  await ctx.reply("📢 Diffusion en cours... Ne quittez pas le bot.");
+  
+  const users = await User.find({ telegram_id: { $exists: true, $ne: "" } });
+  let success = 0;
+  let fail = 0;
+
+  const reply_markup = (tpl.btn_text && tpl.btn_url) 
+    ? { inline_keyboard: [[{ text: tpl.btn_text, url: tpl.btn_url }]] }
+    : undefined;
+
+  for (const u of users) {
+    try {
+      if (tpl.type === 'text') {
+        await ctx.telegram.sendMessage(u.telegram_id, tpl.content || "", { reply_markup });
+      } else if (tpl.type === 'photo' && tpl.media_url) {
+        await ctx.telegram.sendPhoto(u.telegram_id, tpl.media_url, { caption: tpl.content, reply_markup });
+      } else if (tpl.type === 'video' && tpl.media_url) {
+        await ctx.telegram.sendVideo(u.telegram_id, tpl.media_url, { caption: tpl.content, reply_markup });
+      } else if (tpl.type === 'audio' && tpl.media_url) {
+        try {
+          await ctx.telegram.sendVoice(u.telegram_id, tpl.media_url, { caption: tpl.content, reply_markup });
+        } catch {
+          await ctx.telegram.sendAudio(u.telegram_id, tpl.media_url, { caption: tpl.content, reply_markup });
+        }
+      }
+      success++;
+    } catch (e) { fail++; }
+    await new Promise(r => setTimeout(r, 60));
+  }
+
+  await ctx.reply(`✅ Diffusion terminée !\n\nTemplate: ${tpl.name}\n🎉 Succès: ${success}\n❌ Échecs: ${fail}`);
+  await ctx.answerCbQuery();
+});
+
+bot.action("admin_stats", async (ctx) => {
+  if (ctx.from?.id.toString() !== ADMIN_ID) return;
+  const stats = {
+    total: await User.countDocuments(),
+    active: await User.countDocuments({ is_active: true }),
+    pending: await User.countDocuments({ state: /WAITING/ }),
+    withId: await User.countDocuments({ telegram_id: { $exists: true, $ne: "" } })
+  };
+  
+  await ctx.reply(
+    `📊 *Statistiques détaillées*\n\n` +
+    `• Total abonnés : ${stats.total}\n` +
+    `• Accès VIP actifs : ${stats.active}\n` +
+    `• En attente : ${stats.pending}\n` +
+    `• IDs Telegram valides : ${stats.withId}`,
+    { parse_mode: 'Markdown' }
+  );
+  await ctx.answerCbQuery();
+});
+
+bot.action("admin_broadcast_text", async (ctx) => {
+  if (ctx.from?.id.toString() !== ADMIN_ID) return;
+  await AdminSession.updateOne(
+    { admin_id: ADMIN_ID },
+    { action: 'BROADCAST', step: 'BC_MEDIA', data: { type: 'text' } },
+    { upsert: true }
+  );
+  await ctx.reply("✍️ Envoyez maintenant le TEXTE de la diffusion :");
+  await ctx.answerCbQuery();
+});
+
 bot.on("message", async (ctx) => {
   if (ctx.chat.type !== 'private') return;
   const userId = ctx.from.id.toString();
@@ -267,7 +554,119 @@ bot.on("message", async (ctx) => {
 
   const text = (ctx.message as any).text;
   const isPhoto = !!(ctx.message as any).photo;
+  const isVideo = !!(ctx.message as any).video;
+  const isAudio = !!(ctx.message as any).audio || !!(ctx.message as any).voice;
 
+  // --- ADMIN BROADCAST HANDLERS ---
+  if (userId === ADMIN_ID) {
+    const session = await AdminSession.findOne({ admin_id: ADMIN_ID }) as any;
+    
+    if (session) {
+      const { action, step, data } = session;
+
+      // --- TEMPLATE FLOW ---
+      if (action === 'CREATE_TEMPLATE') {
+        if (step === 'TPL_NAME' && text) {
+          await AdminSession.updateOne({ admin_id: ADMIN_ID }, { 
+            step: 'TPL_TYPE', 
+            'data.name': text 
+          });
+          await ctx.reply(`D'accord, le nom est "${text}". Quel est le TYPE de ce template ?`, Markup.inlineKeyboard([
+            [Markup.button.callback("📝 Texte", "tpl_type:text"), Markup.button.callback("🖼 Photo", "tpl_type:photo")],
+            [Markup.button.callback("🎬 Vidéo", "tpl_type:video"), Markup.button.callback("🎵 Audio", "tpl_type:audio")]
+          ]));
+          return;
+        }
+
+        if (step === 'TPL_CONTENT') {
+          const content = text || (ctx.message as any).caption;
+          let media_url = data.media_url;
+
+          if (data.type === 'photo' && isPhoto) media_url = (ctx.message as any).photo.pop().file_id;
+          if (data.type === 'video' && isVideo) media_url = (ctx.message as any).video.file_id;
+          if (data.type === 'audio' && isAudio) media_url = (ctx.message as any).audio?.file_id || (ctx.message as any).voice?.file_id;
+
+          await AdminSession.updateOne({ admin_id: ADMIN_ID }, { 
+            step: 'ADD_BUTTON', 
+            'data.content': content || "",
+            'data.media_url': media_url
+          });
+          
+          await ctx.reply("Bien ! Souhaitez-vous ajouter un BOUTON INLINE à ce template ?", Markup.inlineKeyboard([
+            [Markup.button.callback("✅ Oui, ajouter", "tpl_btn:yes"), Markup.button.callback("❌ Non, terminer", "tpl_btn:no")]
+          ]));
+          return;
+        }
+
+        if (step === 'TPL_BTN_TEXT' && text) {
+          await AdminSession.updateOne({ admin_id: ADMIN_ID }, { 
+            step: 'TPL_BTN_URL', 
+            'data.btn_text': text 
+          });
+          await ctx.reply(`Texte du bouton : "${text}". Maintenant, envoyez l'URL (lien) du bouton (ex: https://...) :`);
+          return;
+        }
+
+        if (step === 'TPL_BTN_URL' && text) {
+          const finalTpl = { ...data, btn_text: data.btn_text, btn_url: text };
+          const tpl = new Template(finalTpl);
+          await tpl.save();
+          await AdminSession.deleteOne({ admin_id: ADMIN_ID });
+          await ctx.reply(`✅ Template "${data.name}" créé avec succès !`);
+          return;
+        }
+      }
+
+      // --- BROADCAST FLOW ---
+      if (action === 'BROADCAST') {
+        if (step === 'BC_MEDIA') {
+          let media_url = "";
+          if (data.type === 'photo' && isPhoto) media_url = (ctx.message as any).photo.pop().file_id;
+          else if (data.type === 'video' && isVideo) media_url = (ctx.message as any).video.file_id;
+          else if (data.type === 'audio' && isAudio) media_url = (ctx.message as any).audio?.file_id || (ctx.message as any).voice?.file_id;
+          else if (data.type === 'text' && text) media_url = ""; // No media
+
+          const content = (ctx.message as any).caption || (data.type === 'text' ? text : "");
+
+          await AdminSession.updateOne({ admin_id: ADMIN_ID }, { 
+            step: 'ADD_BUTTON', 
+            'data.media_url': media_url,
+            'data.content': content
+          });
+
+          await ctx.reply("Souhaitez-vous ajouter un BOUTON INLINE à cette diffusion ?", Markup.inlineKeyboard([
+            [Markup.button.callback("✅ Oui, ajouter", "bc_btn:yes"), Markup.button.callback("🚀 Lancer sans bouton", "bc_btn:no")]
+          ]));
+          return;
+        }
+
+        if (step === 'BC_BTN_TEXT' && text) {
+          await AdminSession.updateOne({ admin_id: ADMIN_ID }, { 
+            step: 'BC_BTN_URL', 
+            'data.btn_text': text 
+          });
+          await ctx.reply(`Texte du bouton : "${text}". Envoyez maintenant l'URL :`);
+          return;
+        }
+
+        if (step === 'BC_BTN_URL' && text) {
+          const finalData = { ...data, btn_url: text };
+          await AdminSession.deleteOne({ admin_id: ADMIN_ID });
+          await launchBroadcast(ctx, finalData);
+          return;
+        }
+      }
+    }
+
+    // fallback legacy handlers
+    if (user.state === 'ADMIN_BROADCAST_TEXT' && text) {
+      await launchBroadcast(ctx, { type: 'text', content: text });
+      await User.updateOne({ telegram_id: ADMIN_ID }, { state: 'START' });
+      return;
+    }
+  }
+
+  // --- REGULAR BOT LOGIC ---
   if (text) await Message.create({ user_id: userId, role: 'user', content: text });
 
   const lowText = text?.toLowerCase() || "";
