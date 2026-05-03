@@ -72,6 +72,18 @@ const Message = mongoose.model('Message', MessageSchema);
 const Setting = mongoose.model('Setting', SettingSchema);
 const BotConfig = mongoose.model('BotConfig', BotConfigSchema);
 
+const TemplateSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  type: { type: String, enum: ['text', 'photo', 'video', 'audio'], default: 'text' },
+  content: String,
+  media_url: String,
+  btn_text: String,
+  btn_url: String,
+  created_at: { type: Date, default: Date.now }
+});
+
+const Template = mongoose.model('Template', TemplateSchema);
+
 // Initial system prompt
 async function initDb() {
   const defaultPrompt = "Tu es Marc, un assistant expert en stratégies de jeux (notamment Apple of Fortune). Ton ton est amical, professionnel et encourageant. Tu parles comme un humain réel. Ton objectif est d'aider l'utilisateur à gagner en utilisant le bot VIP.";
@@ -361,11 +373,24 @@ const authMiddleware = (req: any, res: any, next: any) => {
   } catch { res.status(403).json({ error: "Invalid" }); }
 };
 
+app.post("/api/admin/test-me", authMiddleware, async (req, res) => {
+  const { telegram_id } = req.body;
+  if (!telegram_id) return res.status(400).json({ error: "ID Telegram requis" });
+
+  try {
+    await bot.telegram.sendMessage(telegram_id, "🔔 Test de connexion réussi ! Votre bot est opérationnel.");
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.response?.description || err.message });
+  }
+});
+
 app.get("/api/admin/stats", authMiddleware, async (req, res) => {
   const total = await User.countDocuments();
   const active = await User.countDocuments({ is_active: true });
   const pending = await User.countDocuments({ state: /WAITING/ });
-  res.json({ total, active, pending });
+  const withId = await User.countDocuments({ telegram_id: { $exists: true, $ne: "" } });
+  res.json({ total, active, pending, withId });
 });
 
 app.get("/api/admin/users", authMiddleware, async (req, res) => {
@@ -396,43 +421,115 @@ app.post("/api/admin/bot-config", authMiddleware, async (req, res) => {
   res.json({ success: true });
 });
 
+// --- TEMPLATES ---
+app.get("/api/admin/templates", authMiddleware, async (req, res) => {
+  res.json(await Template.find().sort({ created_at: -1 }));
+});
+
+app.post("/api/admin/templates", authMiddleware, async (req, res) => {
+  const template = new Template(req.body);
+  await template.save();
+  res.json(template);
+});
+
+app.delete("/api/admin/templates/:id", authMiddleware, async (req, res) => {
+  await Template.findByIdAndDelete(req.params.id);
+  res.json({ success: true });
+});
+
 app.get("/keep-alive", (req, res) => res.status(200).send("I'm alive! 🚀"));
+
+// ... existing code ...
+
+app.get("/api/admin/debug-users", authMiddleware, async (req, res) => {
+  const count = await User.countDocuments();
+  const sample = await User.find().limit(5);
+  res.json({ count, sample });
+});
+
+app.get("/api/admin/bot-status", authMiddleware, async (req, res) => {
+  try {
+    const me = await bot.telegram.getMe();
+    res.json({ ok: true, me });
+  } catch (err: any) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 app.post("/api/admin/broadcast", authMiddleware, async (req, res) => {
   const { type, content, media_url, btn_text, btn_url } = req.body;
-  const users = await User.find({}, 'telegram_id');
   
-  if (!users.length) return res.status(400).json({ error: "Aucun utilisateur trouvé" });
+  const users = await User.find({});
+  
+  if (!users || users.length === 0) {
+    console.log("[Broadcast] ❌ No users found in database");
+    return res.status(400).json({ error: "Aucun utilisateur trouvé dans la base de données" });
+  }
+
+  console.log(`[Broadcast] 📢 Starting broadcast to ${users.length} users. Type: ${type}`);
 
   let successCount = 0;
   let failCount = 0;
+  const failures: any[] = [];
 
-  const extra = btn_text && btn_url 
-    ? Markup.inlineKeyboard([[Markup.button.url(btn_text, btn_url)]])
+  const reply_markup = (btn_text && btn_url) 
+    ? { inline_keyboard: [[{ text: btn_text, url: btn_url }]] }
     : undefined;
 
-  for (const user of users) {
-    try {
-      if (type === 'text') {
-        await bot.telegram.sendMessage(user.telegram_id, content || "", extra);
-      } else if (type === 'photo') {
-        await bot.telegram.sendPhoto(user.telegram_id, media_url, { caption: content, ...extra });
-      } else if (type === 'video') {
-        await bot.telegram.sendVideo(user.telegram_id, media_url, { caption: content, ...extra });
-      } else if (type === 'audio') {
-        await bot.telegram.sendVoice(user.telegram_id, media_url, { caption: content, ...extra });
-      }
-      successCount++;
-    } catch (err) {
-      console.error(`[Broadcast] Error for user ${user.telegram_id}:`, err);
-      failCount++;
-    }
-    // Small delay to avoid rate limits
-    await new Promise(r => setTimeout(r, 50));
+  let processMedia = media_url || "";
+  if (processMedia.startsWith('/uploads')) {
+    const protocol = req.headers['x-forwarded-proto'] || 'http';
+    const host = req.get('host');
+    processMedia = `${protocol}://${host}${processMedia}`;
   }
 
-  res.json({ success: true, successCount, failCount });
+  for (const user of users) {
+    const targetId = user.telegram_id;
+    if (!targetId) {
+      failCount++;
+      continue;
+    }
+
+    try {
+      if (type === 'text') {
+        if (!content) throw new Error("Content is required for text broadcast");
+        await bot.telegram.sendMessage(targetId, content, { reply_markup });
+      } else {
+        if (!processMedia) throw new Error("Media URL or File ID is required");
+        
+        if (type === 'photo') {
+          await bot.telegram.sendPhoto(targetId, processMedia, { caption: content, reply_markup });
+        } else if (type === 'video') {
+          await bot.telegram.sendVideo(targetId, processMedia, { caption: content, reply_markup });
+        } else if (type === 'audio') {
+          try {
+            await bot.telegram.sendVoice(targetId, processMedia, { caption: content, reply_markup });
+          } catch {
+            await bot.telegram.sendAudio(targetId, processMedia, { caption: content, reply_markup });
+          }
+        }
+      }
+      successCount++;
+    } catch (err: any) {
+      const errorMsg = err.response?.description || err.message;
+      console.error(`[Broadcast] ❌ Error for ID ${targetId}: ${errorMsg}`);
+      failCount++;
+      failures.push({ id: targetId, error: errorMsg });
+    }
+    
+    await new Promise(r => setTimeout(r, 60));
+  }
+
+  console.log(`[Broadcast] ✅ Finished. Success: ${successCount}, Failed: ${failCount}`);
+  res.json({ 
+    success: true, 
+    successCount, 
+    failCount, 
+    totalCount: users.length,
+    failures: failures.slice(0, 5) // Send back first 5 failures for debugging
+  });
 });
+
 
 app.get("/api/health", (req, res) => res.json({ status: "ok", bot: !!BOT_TOKEN }));
 

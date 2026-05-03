@@ -43,6 +43,18 @@ interface Stats {
   total: number;
   active: number;
   pending: number;
+  withId: number;
+}
+
+interface Template {
+  _id: string;
+  name: string;
+  type: 'text' | 'photo' | 'video' | 'audio';
+  content: string;
+  media_url: string;
+  btn_text: string;
+  btn_url: string;
+  created_at: string;
 }
 
 interface BotStep {
@@ -93,7 +105,7 @@ export default function App() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [botConfigs, setBotConfigs] = useState<BotStep[]>([]);
   const [serverStatus, setServerStatus] = useState<{ ok: boolean; bot: boolean; admin: boolean }>({ ok: false, bot: false, admin: false });
-  const [prompt, setPrompt] = useState('');
+  const [aiSystemPrompt, setAiSystemPrompt] = useState('');
   const [broadcastData, setBroadcastData] = useState({
     type: 'text' as 'text' | 'photo' | 'video' | 'audio',
     content: '',
@@ -101,6 +113,7 @@ export default function App() {
     btn_text: '',
     btn_url: ''
   });
+  const [templates, setTemplates] = useState<Template[]>([]);
   const [isBroadcasting, setIsBroadcasting] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -119,11 +132,12 @@ export default function App() {
       setServerStatus({ ok: true, bot: healthData.bot_token, admin: healthData.admin_id });
 
       const headers = { 'Authorization': `Bearer ${token}` };
-      const [usersRes, statsRes, settingsRes, botRes] = await Promise.all([
+      const [usersRes, statsRes, settingsRes, botRes, templatesRes] = await Promise.all([
         fetch('/api/admin/users', { headers }),
         fetch('/api/admin/stats', { headers }),
         fetch('/api/admin/settings', { headers }),
-        fetch('/api/admin/bot-config', { headers })
+        fetch('/api/admin/bot-config', { headers }),
+        fetch('/api/admin/templates', { headers })
       ]);
 
       if (usersRes.status === 403) return handleLogout();
@@ -132,11 +146,13 @@ export default function App() {
       const statsData = await statsRes.json();
       const settingsData = await settingsRes.json();
       const botData = await botRes.json();
+      const templatesData = await templatesRes.json();
 
       setUsers(usersData);
       setStats(statsData);
-      setPrompt(settingsData.value);
+      setAiSystemPrompt(settingsData.value);
       setBotConfigs(botData);
+      setTemplates(templatesData);
     } catch (err) {
       console.error(err);
     }
@@ -204,6 +220,7 @@ export default function App() {
 
   const handleBroadcast = async () => {
     if (!broadcastData.content && broadcastData.type === 'text') return alert("Le message est vide");
+    if (!broadcastData.media_url && broadcastData.type !== 'text') return alert("L'URL du média est requise");
     if (!window.confirm("Voulez-vous lancer la diffusion à tous les utilisateurs ?")) return;
 
     setIsBroadcasting(true);
@@ -217,11 +234,35 @@ export default function App() {
         body: JSON.stringify(broadcastData)
       });
       const data = await res.json();
-      alert(`Diffusion terminée !\n✅ Succès: ${data.successCount}\n❌ Échecs: ${data.failCount}`);
+      if (!res.ok) {
+        alert("Erreur: " + (data.error || "La diffusion a échoué"));
+      } else {
+        let msg = `Diffusion terminée !\n👥 Total ciblé: ${data.totalCount}\n✅ Succès: ${data.successCount}\n❌ Échecs: ${data.failCount}`;
+        if (data.failures && data.failures.length > 0) {
+          msg += "\n\nQuelques erreurs :\n" + data.failures.map((f: any) => `- ID ${f.id}: ${f.error}`).join('\n');
+        }
+        alert(msg);
+      }
     } catch (err) {
-      alert("Erreur lors de la diffusion");
+      alert("Erreur de connexion lors de la diffusion");
     } finally {
       setIsBroadcasting(false);
+    }
+  };
+
+  const checkBotStatus = async () => {
+    try {
+      const res = await fetch('/api/admin/bot-status', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (data.ok) {
+        alert(`✅ Bot opérationnel !\nNom: ${data.me.first_name}\nUsername: @${data.me.username}`);
+      } else {
+        alert(`❌ Erreur Bot: ${data.error}`);
+      }
+    } catch (err) {
+      alert("Erreur réseau lors du check bot");
     }
   };
 
@@ -229,6 +270,32 @@ export default function App() {
     localStorage.removeItem('admin_token');
     setIsLoggedIn(false);
     setToken('');
+  };
+
+  const handleSaveTemplate = async () => {
+    const name = prompt("Nom du template :");
+    if (!name) return;
+    try {
+      const res = await fetch('/api/admin/templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ ...broadcastData, name })
+      });
+      const data = await res.json();
+      setTemplates([data, ...templates]);
+      alert("Template sauvegardé !");
+    } catch (e) { alert("Erreur"); }
+  };
+
+  const handleDeleteTemplate = async (id: string) => {
+    if (!confirm("Supprimer ce template ?")) return;
+    try {
+      await fetch(`/api/admin/templates/${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      setTemplates(templates.filter(t => t._id !== id));
+    } catch (e) { alert("Erreur"); }
   };
 
   const updateSettings = async () => {
@@ -239,7 +306,7 @@ export default function App() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ prompt })
+        body: JSON.stringify({ prompt: aiSystemPrompt })
       });
       alert("Prompt mis à jour !");
     } catch (err) {
@@ -374,10 +441,11 @@ export default function App() {
                 className="space-y-8"
               >
                 {stats && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                     <StatCard label="Total Abonnés" value={stats.total} icon={Users} color="bg-blue-600" />
                     <StatCard label="Accès Actifs" value={stats.active} icon={CheckCircle} color="bg-emerald-500" />
                     <StatCard label="En Attente" value={stats.pending} icon={Clock} color="bg-amber-500" />
+                    <StatCard label="IDs Valides" value={stats.withId} icon={ShieldCheck} color="bg-purple-600" />
                   </div>
                 )}
 
@@ -623,15 +691,44 @@ export default function App() {
             {activeTab === 'broadcast' && (
             <div className="space-y-6">
               <div className="bg-[#0f1115] border border-gray-800/50 rounded-2xl p-6 md:p-8">
-                <div className="flex items-center gap-3 mb-8">
-                  <div className="p-3 bg-blue-500/10 rounded-xl">
-                    <Megaphone className="text-blue-500" size={24} />
+                <div className="flex items-center justify-between mb-8">
+                  <div className="flex items-center gap-3">
+                    <div className="p-3 bg-blue-500/10 rounded-xl">
+                      <Megaphone className="text-blue-500" size={24} />
+                    </div>
+                    <div>
+                      <h2 className="text-xl font-bold text-white">Nouvelle Diffusion</h2>
+                      <p className="text-sm text-gray-500">Envoyez un message à tous vos membres Telegram</p>
+                    </div>
                   </div>
-                  <div>
-                    <h2 className="text-xl font-bold text-white">Nouvelle Diffusion</h2>
-                    <p className="text-sm text-gray-500">Envoyez un message à tous vos membres Telegram</p>
-                  </div>
+                  <button 
+                    onClick={handleSaveTemplate}
+                    className="flex items-center gap-2 bg-blue-500/10 text-blue-400 px-4 py-2 rounded-xl border border-blue-500/20 text-xs font-bold hover:bg-blue-500/20 transition-all"
+                  >
+                    <Save size={14} /> Sauvegarder comme Template
+                  </button>
                 </div>
+
+                {templates.length > 0 && (
+                  <div className="mb-8 overflow-x-auto pb-2 flex gap-3">
+                    {templates.map(t => (
+                      <div key={t._id} className="flex-shrink-0 relative group">
+                        <button
+                          onClick={() => setBroadcastData({ type: t.type, content: t.content, media_url: t.media_url, btn_text: t.btn_text, btn_url: t.btn_url })}
+                          className="px-4 py-2 bg-gray-900 border border-gray-800 rounded-xl text-xs font-medium text-gray-300 hover:border-blue-500 hover:text-white transition-all flex items-center gap-2"
+                        >
+                          {t.name}
+                        </button>
+                        <button 
+                          onClick={() => handleDeleteTemplate(t._id)}
+                          className="absolute -top-1 -right-1 bg-red-500 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <Trash2 size={8} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                   <div className="space-y-6">
@@ -720,7 +817,36 @@ export default function App() {
 
                     {/* Preview (Simple) */}
                     <div className="border border-gray-800/50 rounded-2xl p-6 bg-black/20">
-                      <span className="text-[10px] font-bold text-gray-600 uppercase tracking-widest mb-4 block">Aperçu rapide</span>
+                      <div className="flex items-center justify-between mb-4">
+                        <span className="text-[10px] font-bold text-gray-600 uppercase tracking-widest block">Aperçu rapide</span>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={checkBotStatus}
+                            className="text-[10px] bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 px-2 py-1 rounded border border-blue-500/20 transition-colors"
+                          >
+                            Statut Bot
+                          </button>
+                          <button 
+                            onClick={async () => {
+                              const id = prompt("Entrez votre ID Telegram pour tester :");
+                              if (!id) return;
+                              try {
+                                const res = await fetch('/api/admin/test-me', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                                  body: JSON.stringify({ telegram_id: id })
+                                });
+                                const data = await res.json();
+                                if (res.ok) alert("✅ Test envoyé ! Vérifiez votre Telegram.");
+                                else alert("❌ Erreur : " + data.error);
+                              } catch (e) { alert("Erreur réseau"); }
+                            }}
+                            className="text-[10px] bg-white/5 hover:bg-white/10 text-gray-400 px-2 py-1 rounded border border-gray-800 transition-colors"
+                          >
+                            Tester sur moi
+                          </button>
+                        </div>
+                      </div>
                       <div className="bg-[#1c1f26] rounded-2xl p-4 max-w-[280px]">
                         {broadcastData.type !== 'text' && broadcastData.media_url && (
                           <div className="aspect-video bg-black/40 rounded-lg mb-3 flex items-center justify-center text-gray-600 border border-gray-800/50">
@@ -753,7 +879,7 @@ export default function App() {
                       ) : (
                         <>
                           <Send size={18} />
-                          Diffuser à tous les membres
+                          Diffuser à {users.length} membres
                         </>
                       )}
                     </button>
@@ -778,8 +904,8 @@ export default function App() {
                   Modifiez le comportement du bot VIP. Ce prompt définit sa personnalité et ses connaissances.
                 </p>
                 <textarea
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
+                  value={aiSystemPrompt}
+                  onChange={(e) => setAiSystemPrompt(e.target.value)}
                   className="w-full h-48 bg-black border border-gray-800 text-white p-4 rounded-xl focus:ring-2 focus:ring-blue-500 transition-all outline-none font-mono text-sm leading-relaxed"
                 />
                 <button
